@@ -14,6 +14,7 @@ const client = new WebTorrent()
 let torrent = null
 const probeCache = new Map()
 const prebuffering = new Set()
+let playbackStatus = null
 
 client.on('error', err => console.error('WebTorrent error:', err))
 client.on('warning', err => console.warn('WebTorrent warning:', err.message || err))
@@ -241,6 +242,23 @@ async function servePlay(req, res, index, url) {
 
     console.log(`PLAY [${index}] audio=${audio ? audio.code : 'none'} sub=${subtitle ? subtitle.code : 'off'} start=${start.toFixed(1)}`)
 
+    const playId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    playbackStatus = {
+      id: playId,
+      index: Number(index),
+      name: meta.name,
+      audio: audio ? audio.code : 'none',
+      sub: subtitle ? subtitle.code : 'off',
+      start,
+      state: 'starting',
+      startedAt: Date.now(),
+      bytesOut: 0,
+      lastOutputAt: null,
+      ffmpegPid: null,
+      exitCode: null,
+      error: null
+    }
+
     res.writeHead(200, {
       'Content-Type': 'video/mp4',
       'Cache-Control': 'no-store',
@@ -248,7 +266,15 @@ async function servePlay(req, res, index, url) {
     })
 
     const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    if (playbackStatus && playbackStatus.id === playId) playbackStatus.ffmpegPid = ff.pid || null
     let stderr = ''
+    ff.stdout.on('data', chunk => {
+      if (playbackStatus && playbackStatus.id === playId) {
+        playbackStatus.bytesOut += chunk.length
+        playbackStatus.lastOutputAt = Date.now()
+        playbackStatus.state = 'streaming'
+      }
+    })
     ff.stderr.on('data', chunk => {
       const text = chunk.toString('utf8')
       stderr += text
@@ -257,6 +283,9 @@ async function servePlay(req, res, index, url) {
     ff.stdout.pipe(res)
 
     const stop = () => {
+      if (playbackStatus && playbackStatus.id === playId && playbackStatus.state !== 'error') {
+        playbackStatus.state = 'stopped'
+      }
       if (!ff.killed) ff.kill('SIGTERM')
     }
     // Do not use req.on('close') here: since Node 16 it means the
@@ -264,8 +293,23 @@ async function servePlay(req, res, index, url) {
     // The video response closing is the event that should stop ffmpeg.
     res.on('close', stop)
 
-    ff.on('error', err => console.error('ffmpeg spawn error:', err))
+    ff.on('error', err => {
+      console.error('ffmpeg spawn error:', err)
+      if (playbackStatus && playbackStatus.id === playId) {
+        playbackStatus.state = 'error'
+        playbackStatus.error = err.message
+      }
+    })
     ff.on('close', code => {
+      if (playbackStatus && playbackStatus.id === playId) {
+        playbackStatus.exitCode = code
+        if (code && code !== 255 && code !== 143) {
+          playbackStatus.state = 'error'
+          playbackStatus.error = (stderr || `ffmpeg exited ${code}`).slice(-2000)
+        } else if (playbackStatus.state !== 'stopped' && playbackStatus.state !== 'error') {
+          playbackStatus.state = 'finished'
+        }
+      }
       if (code && code !== 255 && code !== 143) {
         console.error(`ffmpeg exited ${code}:\n${stderr}`)
       }
@@ -387,6 +431,12 @@ function appHtml() {
   .small { font-size:16px; color:#aaa; }
   #seek { width:100%; box-sizing:border-box; }
   #status { min-height:24px; color:#bbb; }
+  .statusbox { margin:14px 0; padding:14px 16px; background:#191919; border:1px solid #333; border-radius:8px; }
+  .statusline { margin:5px 0; }
+  .status-ok { color:#79d279; }
+  .status-warn { color:#ffd166; }
+  .status-bad { color:#ff7777; }
+  .status-muted { color:#aaa; }
 </style>
 </head>
 <body>
@@ -404,6 +454,12 @@ function appHtml() {
     <label>Subtitles <select id="sub"><option value="off">Off</option></select></label>
     <label><input id="autonext" type="checkbox"> Auto next</label>
     <button id="play">▶ Play</button>
+  </div>
+
+  <div class="statusbox">
+    <div class="statusline"><strong>Status:</strong> <span id="humanStatus">Starting server status…</span></div>
+    <div class="statusline small" id="torrentStatus">Torrent: checking…</div>
+    <div class="statusline small" id="playerStatus">Player: idle</div>
   </div>
 
   <video id="video" controls playsinline></video>
@@ -436,6 +492,11 @@ function appHtml() {
   var seek = document.getElementById('seek');
   var clock = document.getElementById('clock');
   var status = document.getElementById('status');
+  var humanStatus = document.getElementById('humanStatus');
+  var torrentStatus = document.getElementById('torrentStatus');
+  var playerStatus = document.getElementById('playerStatus');
+  var lastServerStatus = null;
+  var browserState = 'idle';
 
   function get(key, fallback) {
     try {
@@ -492,6 +553,97 @@ function appHtml() {
     var s = seconds % 60;
     if (h) return h + ':' + (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
     return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function fmtBytes(bytes) {
+    bytes = Number(bytes || 0);
+    if (bytes < 1024) return Math.round(bytes) + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+    return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+
+  function fmtSpeed(bytes) {
+    return fmtBytes(bytes) + '/s';
+  }
+
+  function setHumanStatus(text, cls) {
+    humanStatus.textContent = text;
+    humanStatus.className = cls || '';
+  }
+
+  function refreshHumanStatus() {
+    var s = lastServerStatus;
+    if (!s || !s.ready) {
+      setHumanStatus('Loading torrent metadata…', 'status-warn');
+      return;
+    }
+    if (s.playback && s.playback.state === 'error') {
+      setHumanStatus('Playback failed — ffmpeg returned an error.', 'status-bad');
+      return;
+    }
+    if (browserState === 'error') {
+      setHumanStatus('Browser could not play the stream.', 'status-bad');
+      return;
+    }
+    if (s.peers === 0) {
+      setHumanStatus('No torrent peers yet — waiting for sources.', 'status-warn');
+      return;
+    }
+    if (browserState === 'playing') {
+      setHumanStatus('Playing normally.', 'status-ok');
+      return;
+    }
+    if (browserState === 'waiting' || browserState === 'stalled') {
+      if (s.downloadSpeed > 0) setHumanStatus('Buffering — torrent data is arriving, please wait.', 'status-warn');
+      else setHumanStatus('Buffering — connected to peers, but no data is arriving right now.', 'status-warn');
+      return;
+    }
+    if (s.playback && s.playback.state === 'starting') {
+      if (s.downloadSpeed > 0) setHumanStatus('Preparing video — downloading required pieces and starting ffmpeg…', 'status-warn');
+      else setHumanStatus('Preparing video — waiting for required torrent pieces…', 'status-warn');
+      return;
+    }
+    if (s.playback && s.playback.state === 'streaming' && s.playback.bytesOut > 0) {
+      setHumanStatus('Video stream is being produced; browser is waiting for enough data.', 'status-warn');
+      return;
+    }
+    if (isPlaying) {
+      setHumanStatus('Starting playback…', 'status-warn');
+      return;
+    }
+    setHumanStatus('Ready.', 'status-ok');
+  }
+
+  function pollServerStatus() {
+    xhrJson('/api/status?_=' + Date.now(), function (err, s) {
+      if (err) {
+        torrentStatus.textContent = 'Torrent: status request failed: ' + err.message;
+        torrentStatus.className = 'statusline small status-bad';
+        setHumanStatus('Cannot reach the media server.', 'status-bad');
+        return;
+      }
+      lastServerStatus = s;
+      if (!s.ready) {
+        torrentStatus.textContent = 'Torrent: loading metadata…';
+        torrentStatus.className = 'statusline small status-warn';
+      } else {
+        torrentStatus.textContent = 'Torrent: ' + s.peers + ' peers · ' + fmtSpeed(s.downloadSpeed) + ' · ' + fmtBytes(s.downloaded) + ' received · total torrent ' + (Number(s.progress || 0) * 100).toFixed(2) + '%';
+        torrentStatus.className = 'statusline small ' + (s.peers > 0 ? 'status-ok' : 'status-warn');
+      }
+      if (!s.playback) {
+        playerStatus.textContent = 'Player: idle';
+        playerStatus.className = 'statusline small status-muted';
+      } else {
+        var pb = s.playback;
+        var age = Math.max(0, Math.floor((Date.now() - pb.startedAt) / 1000));
+        var extra = pb.bytesOut ? ' · ' + fmtBytes(pb.bytesOut) + ' produced' : '';
+        if (pb.lastOutputAt) extra += ' · last output ' + Math.max(0, Math.floor((Date.now() - pb.lastOutputAt) / 1000)) + 's ago';
+        playerStatus.textContent = 'Player: ' + pb.state + ' · episode [' + pb.index + '] · audio=' + pb.audio + ' · subtitles=' + pb.sub + ' · ' + age + 's' + extra;
+        playerStatus.className = 'statusline small ' + (pb.state === 'error' ? 'status-bad' : (pb.state === 'streaming' ? 'status-ok' : 'status-warn'));
+      }
+      refreshHumanStatus();
+    });
   }
 
   function absoluteTime() {
@@ -560,6 +712,8 @@ function appHtml() {
     set('tms.autonext', autonext.checked ? '1' : '0');
 
     status.textContent = 'Starting...';
+    browserState = 'starting';
+    refreshHumanStatus();
     var src = '/play/' + currentIndex + '?audio=' + encodeURIComponent(audio.value || '') +
       '&sub=' + encodeURIComponent(sub.value || 'off') + '&start=' + encodeURIComponent(seconds.toFixed(3)) + '&_=' + Date.now();
     video.src = src;
@@ -577,6 +731,8 @@ function appHtml() {
     set('tms.lastEpisode', index);
     episode.value = String(index);
     status.textContent = 'Reading tracks...';
+    browserState = 'probing';
+    refreshHumanStatus();
     video.pause();
     video.removeAttribute('src');
     video.load();
@@ -597,6 +753,8 @@ function appHtml() {
       seek.value = Math.floor(startOffset);
       updateClock();
       status.textContent = 'Ready';
+      browserState = 'idle';
+      refreshHumanStatus();
       if (automatic) playFrom(0, true);
     });
   }
@@ -634,9 +792,19 @@ function appHtml() {
 
   seek.onchange = function () { playFrom(Number(seek.value) || 0, false); };
 
-  video.addEventListener('playing', function () { status.textContent = ''; isPlaying = true; });
-  video.addEventListener('waiting', function () { status.textContent = 'Buffering...'; });
-  video.addEventListener('error', function () { status.textContent = 'Playback error. Check server log.'; });
+  video.addEventListener('loadstart', function () { browserState = 'loading'; status.textContent = 'Loading stream…'; refreshHumanStatus(); });
+  video.addEventListener('loadedmetadata', function () { browserState = 'metadata'; status.textContent = 'Video metadata received…'; refreshHumanStatus(); });
+  video.addEventListener('canplay', function () { browserState = 'canplay'; status.textContent = 'Enough data to start…'; refreshHumanStatus(); });
+  video.addEventListener('playing', function () { status.textContent = ''; isPlaying = true; browserState = 'playing'; refreshHumanStatus(); });
+  video.addEventListener('waiting', function () { status.textContent = 'Buffering…'; browserState = 'waiting'; refreshHumanStatus(); });
+  video.addEventListener('stalled', function () { status.textContent = 'Stream stalled…'; browserState = 'stalled'; refreshHumanStatus(); });
+  video.addEventListener('pause', function () { if (!video.ended && browserState === 'playing') { browserState = 'paused'; refreshHumanStatus(); } });
+  video.addEventListener('error', function () {
+    var code = video.error ? video.error.code : 0;
+    status.textContent = 'Playback error' + (code ? ' (code ' + code + ')' : '') + '.';
+    browserState = 'error';
+    refreshHumanStatus();
+  });
   video.addEventListener('timeupdate', function () {
     updateClock();
     var now = absoluteTime();
@@ -648,12 +816,15 @@ function appHtml() {
   });
   video.addEventListener('ended', function () {
     isPlaying = false;
+    browserState = 'ended';
     clearPosition(currentIndex);
     if (autonext.checked && meta && meta.next !== null) goNext(true);
     else status.textContent = 'Episode finished';
   });
 
   autonext.checked = get('tms.autonext', '1') !== '0';
+  pollServerStatus();
+  setInterval(pollServerStatus, 1000);
 
   xhrJson('/api/files', function (err, data) {
     if (err) {
@@ -694,7 +865,8 @@ const server = http.createServer(async (req, res) => {
         peers: torrent.numPeers,
         downloadSpeed: torrent.downloadSpeed,
         downloaded: torrent.downloaded,
-        progress: torrent.progress
+        progress: torrent.progress,
+        playback: playbackStatus
       })
     }
 
