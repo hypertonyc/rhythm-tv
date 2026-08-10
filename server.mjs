@@ -222,8 +222,9 @@ function sessionSnapshot(session) {
     ffmpegPid: session.ffmpegPid,
     exitCode: session.exitCode,
     error: session.error,
-    playlist: `/hls/${session.id}/index.m3u8`,
-    format: 'HLS/MPEG-TS'
+    playlist: `/hls/${session.id}/${session.playlistFile || 'index.m3u8'}`,
+    format: session.sub !== 'off' ? 'HLS/MPEG-TS + WebVTT' : 'HLS/MPEG-TS',
+    downloadedSinceStart: torrent ? Math.max(0, torrent.downloaded - (session.downloadedAtStart || 0)) : 0
   }
 }
 
@@ -281,10 +282,13 @@ async function startHlsSession(index, url) {
   if (audio) args.push('-map', `0:${audio.index}`)
   else args.push('-an')
 
-  if (subtitle) {
-    const filter = `subtitles=${escapeFilterUrl(rawUrl(index))}:si=${subtitle.relativeIndex}`
-    args.push('-vf', filter)
-  }
+  // Do NOT burn embedded subtitles with the `subtitles=` video filter here.
+  // That filter opens the media a second time and reads subtitle packets to EOF
+  // before rendering starts, which forces a torrent-backed episode to download
+  // almost completely before the first video segment can be produced.
+  // Instead, selected subtitles are mapped once from the main input and emitted
+  // as an out-of-band WebVTT HLS rendition.
+  if (subtitle) args.push('-map', `0:${subtitle.index}`)
 
   // Always normalize the stream for the 2015 Samsung decoder/browser:
   // H.264 + yuv420p + AAC in MPEG-TS HLS segments.
@@ -303,19 +307,33 @@ async function startHlsSession(index, url) {
     args.push('-c:a', 'aac', '-b:a', '160k', '-ac', '2', '-ar', '48000')
   }
 
+  if (subtitle) args.push('-c:s', 'webvtt')
+  else args.push('-sn')
+
   args.push(
-    '-sn',
     '-map_metadata', '-1',
     '-f', 'hls',
     '-hls_time', '4',
     '-hls_list_size', '0',
     '-hls_segment_type', 'mpegts',
     '-hls_flags', 'temp_file',
-    '-hls_segment_filename', segmentPattern,
-    playlistPath
+    '-hls_segment_filename', segmentPattern
   )
 
-  console.log(`HLS [${index}] audio=${audio ? audio.code : 'none'} sub=${subtitle ? subtitle.code : 'off'} start=${start.toFixed(1)}`)
+  // With subtitles, generate a small HLS master playlist that points at the
+  // MPEG-TS A/V stream plus an out-of-band WebVTT subtitle rendition. Samsung
+  // Smart TV recommends WebVTT for HLS, and this allows the first media segments
+  // to be generated immediately instead of pre-reading the full MP4.
+  if (subtitle) {
+    args.push(
+      '-var_stream_map', `v:0${audio ? ',a:0' : ''},s:0,sgroup:subs,language:${subtitle.code},default:yes`,
+      '-master_pl_name', 'master.m3u8'
+    )
+  }
+
+  args.push(playlistPath)
+
+  console.log(`HLS [${index}] audio=${audio ? audio.code : 'none'} sub=${subtitle ? subtitle.code : 'off'} start=${start.toFixed(1)} mode=${subtitle ? 'webvtt' : 'no-subs'}`)
 
   const session = {
     id,
@@ -325,6 +343,8 @@ async function startHlsSession(index, url) {
     audio: audio ? audio.code : 'none',
     sub: subtitle ? subtitle.code : 'off',
     start,
+    playlistFile: subtitle ? 'master.m3u8' : 'index.m3u8',
+    downloadedAtStart: torrent ? torrent.downloaded : 0,
     state: 'preparing',
     startedAt: Date.now(),
     lastOutputAt: null,
@@ -397,7 +417,9 @@ async function startHlsSession(index, url) {
 function serveHlsFile(res, sessionId, fileName) {
   const session = hlsSessions.get(sessionId)
   if (!session) return sendText(res, 404, 'HLS session not found')
-  if (!/^(index\.m3u8|seg\d+\.ts)$/.test(fileName)) return sendText(res, 400, 'Bad HLS path')
+  // ffmpeg may generate index.m3u8, master.m3u8, index_vtt.m3u8,
+  // segNNNNN.ts and indexN.vtt. Only serve flat, safe media filenames.
+  if (!/^[A-Za-z0-9._-]+\.(m3u8|ts|vtt)$/.test(fileName)) return sendText(res, 400, 'Bad HLS path')
 
   const full = path.join(session.dir, fileName)
   if (!fs.existsSync(full)) return sendText(res, 404, 'Not ready')
@@ -408,7 +430,9 @@ function serveHlsFile(res, sessionId, fileName) {
 
   const type = fileName.endsWith('.m3u8')
     ? 'application/vnd.apple.mpegurl'
-    : 'video/mp2t'
+    : fileName.endsWith('.vtt')
+      ? 'text/vtt; charset=utf-8'
+      : 'video/mp2t'
   res.writeHead(200, {
     'Content-Type': type,
     'Content-Length': body.length,
@@ -776,6 +800,7 @@ function appHtml() {
         var pb = s.playback;
         var age = Math.max(0, Math.floor((Date.now() - pb.startedAt) / 1000));
         var extra = pb.bytesOut ? ' · ' + fmtBytes(pb.bytesOut) + ' produced · ' + (pb.segments || 0) + ' HLS segments' : '';
+        if (typeof pb.downloadedSinceStart === 'number') extra += ' · ' + fmtBytes(pb.downloadedSinceStart) + ' downloaded for this playback';
         if (pb.lastOutputAt) extra += ' · last output ' + Math.max(0, Math.floor((Date.now() - pb.lastOutputAt) / 1000)) + 's ago';
         playerStatus.textContent = 'Player: ' + pb.state + ' · episode [' + pb.index + '] · audio=' + pb.audio + ' · subtitles=' + pb.sub + ' · ' + age + 's' + extra;
         playerStatus.className = 'statusline small ' + (pb.state === 'error' ? 'status-bad' : ((pb.state === 'ready' || pb.state === 'finished') ? 'status-ok' : 'status-warn'));
@@ -1078,7 +1103,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, sessionSnapshot(session))
     }
 
-    m = url.pathname.match(/^\/hls\/([a-z0-9-]+)\/(index\.m3u8|seg\d+\.ts)$/i)
+    m = url.pathname.match(/^\/hls\/([a-z0-9-]+)\/([A-Za-z0-9._-]+\.(?:m3u8|ts|vtt))$/i)
     if (m) return serveHlsFile(res, m[1], m[2])
 
     return sendText(res, 404, 'Not found')
