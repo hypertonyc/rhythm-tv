@@ -1,6 +1,9 @@
 import WebTorrent from 'webtorrent'
 import http from 'node:http'
 import { spawn } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
 
 const PORT = Number(process.env.PORT || 8000)
 const torrentFile = process.argv[2]
@@ -15,6 +18,8 @@ let torrent = null
 const probeCache = new Map()
 const prebuffering = new Set()
 let playbackStatus = null
+const hlsSessions = new Map()
+let activeHlsSession = null
 
 client.on('error', err => console.error('WebTorrent error:', err))
 client.on('warning', err => console.warn('WebTorrent warning:', err.message || err))
@@ -185,141 +190,232 @@ function escapeFilterUrl(url) {
   return `'${url.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'")}'`
 }
 
-async function servePlay(req, res, index, url) {
+function safeRm(dir) {
+  try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+}
+
+function sessionSnapshot(session) {
+  if (!session) return null
+  let segments = 0
+  let bytesOut = 0
   try {
-    const meta = await probeFile(index)
-    if (!meta.video) return sendText(res, 415, 'No video stream')
-
-    const audioPref = url.searchParams.get('audio') || ''
-    const subPref = url.searchParams.get('sub') || 'off'
-    const start = Math.max(0, Number(url.searchParams.get('start') || 0) || 0)
-
-    const audio = chooseTrack(meta.audio, audioPref)
-    const subtitle = subPref === 'off' ? null : chooseTrack(meta.subtitles, subPref)
-
-    const args = ['-hide_banner', '-loglevel', 'warning', '-i', rawUrl(index)]
-
-    // Output-side seek keeps subtitle timestamps correct. It can re-read the
-    // already-viewed prefix on resume/seek, but normal sequential playback is unaffected.
-    if (start > 0.05) args.push('-ss', start.toFixed(3))
-
-    args.push('-map', `0:${meta.video.index}`)
-    if (audio) args.push('-map', `0:${audio.index}`)
-    else args.push('-an')
-
-    if (subtitle) {
-      const filter = `subtitles=${escapeFilterUrl(rawUrl(index))}:si=${subtitle.relativeIndex}`
-      args.push(
-        '-vf', filter,
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
-        '-crf', '20',
-        '-pix_fmt', 'yuv420p'
-      )
-    } else if (meta.video.codec === 'h264') {
-      args.push('-c:v', 'copy')
-    } else {
-      args.push(
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
-        '-crf', '20',
-        '-pix_fmt', 'yuv420p'
-      )
+    const names = fs.readdirSync(session.dir)
+    for (const name of names) {
+      if (/^seg\d+\.ts$/.test(name)) {
+        segments++
+        try { bytesOut += fs.statSync(path.join(session.dir, name)).size } catch {}
+      }
     }
-
-    if (audio) {
-      // AAC is the safest browser/TV choice; audio transcoding is cheap.
-      args.push('-c:a', 'aac', '-b:a', '160k', '-ac', '2')
-    }
-
-    args.push(
-      '-sn',
-      '-map_metadata', '-1',
-      '-f', 'mp4',
-      '-movflags', '+frag_keyframe+empty_moov+default_base_moof',
-      'pipe:1'
-    )
-
-    console.log(`PLAY [${index}] audio=${audio ? audio.code : 'none'} sub=${subtitle ? subtitle.code : 'off'} start=${start.toFixed(1)}`)
-
-    const playId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
-    playbackStatus = {
-      id: playId,
-      index: Number(index),
-      name: meta.name,
-      audio: audio ? audio.code : 'none',
-      sub: subtitle ? subtitle.code : 'off',
-      start,
-      state: 'starting',
-      startedAt: Date.now(),
-      bytesOut: 0,
-      lastOutputAt: null,
-      ffmpegPid: null,
-      exitCode: null,
-      error: null
-    }
-
-    res.writeHead(200, {
-      'Content-Type': 'video/mp4',
-      'Cache-Control': 'no-store',
-      'Connection': 'close'
-    })
-
-    const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    if (playbackStatus && playbackStatus.id === playId) playbackStatus.ffmpegPid = ff.pid || null
-    let stderr = ''
-    ff.stdout.on('data', chunk => {
-      if (playbackStatus && playbackStatus.id === playId) {
-        playbackStatus.bytesOut += chunk.length
-        playbackStatus.lastOutputAt = Date.now()
-        playbackStatus.state = 'streaming'
-      }
-    })
-    ff.stderr.on('data', chunk => {
-      const text = chunk.toString('utf8')
-      stderr += text
-      if (stderr.length > 12000) stderr = stderr.slice(-12000)
-    })
-    ff.stdout.pipe(res)
-
-    const stop = () => {
-      if (playbackStatus && playbackStatus.id === playId && playbackStatus.state !== 'error') {
-        playbackStatus.state = 'stopped'
-      }
-      if (!ff.killed) ff.kill('SIGTERM')
-    }
-    // Do not use req.on('close') here: since Node 16 it means the
-    // incoming HTTP request itself completed, not that the viewer disconnected.
-    // The video response closing is the event that should stop ffmpeg.
-    res.on('close', stop)
-
-    ff.on('error', err => {
-      console.error('ffmpeg spawn error:', err)
-      if (playbackStatus && playbackStatus.id === playId) {
-        playbackStatus.state = 'error'
-        playbackStatus.error = err.message
-      }
-    })
-    ff.on('close', code => {
-      if (playbackStatus && playbackStatus.id === playId) {
-        playbackStatus.exitCode = code
-        if (code && code !== 255 && code !== 143) {
-          playbackStatus.state = 'error'
-          playbackStatus.error = (stderr || `ffmpeg exited ${code}`).slice(-2000)
-        } else if (playbackStatus.state !== 'stopped' && playbackStatus.state !== 'error') {
-          playbackStatus.state = 'finished'
-        }
-      }
-      if (code && code !== 255 && code !== 143) {
-        console.error(`ffmpeg exited ${code}:\n${stderr}`)
-      }
-      if (!res.writableEnded) res.end()
-    })
-  } catch (err) {
-    console.error(err)
-    if (!res.headersSent) sendText(res, 500, err.message)
-    else res.destroy(err)
+  } catch {}
+  return {
+    id: session.id,
+    index: session.index,
+    name: session.name,
+    audio: session.audio,
+    sub: session.sub,
+    start: session.start,
+    state: session.state,
+    startedAt: session.startedAt,
+    segments,
+    bytesOut,
+    lastOutputAt: session.lastOutputAt,
+    ffmpegPid: session.ffmpegPid,
+    exitCode: session.exitCode,
+    error: session.error,
+    playlist: `/hls/${session.id}/index.m3u8`,
+    format: 'HLS/MPEG-TS'
   }
+}
+
+function stopHlsSession(session, reason = 'stopped') {
+  if (!session) return
+  if (session.state !== 'error' && session.state !== 'finished') session.state = reason
+  if (session.monitor) {
+    clearInterval(session.monitor)
+    session.monitor = null
+  }
+  if (session.ff && !session.ff.killed) {
+    try { session.ff.kill('SIGTERM') } catch {}
+  }
+}
+
+function scheduleHlsCleanup(session, delayMs = 10 * 60 * 1000) {
+  if (!session || session.cleanupTimer) return
+  session.cleanupTimer = setTimeout(() => {
+    hlsSessions.delete(session.id)
+    safeRm(session.dir)
+  }, delayMs)
+  if (session.cleanupTimer.unref) session.cleanupTimer.unref()
+}
+
+async function startHlsSession(index, url) {
+  const meta = await probeFile(index)
+  if (!meta.video) throw new Error('No video stream')
+
+  const audioPref = url.searchParams.get('audio') || ''
+  const subPref = url.searchParams.get('sub') || 'off'
+  const start = Math.max(0, Number(url.searchParams.get('start') || 0) || 0)
+  const audio = chooseTrack(meta.audio, audioPref)
+  const subtitle = subPref === 'off' ? null : chooseTrack(meta.subtitles, subPref)
+
+  if (activeHlsSession) {
+    stopHlsSession(activeHlsSession, 'replaced')
+    scheduleHlsCleanup(activeHlsSession, 2 * 60 * 1000)
+  }
+
+  const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const dir = path.join(os.tmpdir(), `tms-hls-${id}`)
+  fs.mkdirSync(dir, { recursive: true })
+  const playlistPath = path.join(dir, 'index.m3u8')
+  const segmentPattern = path.join(dir, 'seg%05d.ts')
+
+  // MPEG-TS HLS is intentional: Samsung's 2015 streaming engine supports HLS v3,
+  // while the previous fragmented-MP4 response is too new/fragile for that browser.
+  const args = ['-hide_banner', '-loglevel', 'warning', '-i', rawUrl(index)]
+
+  // Output-side seek keeps embedded-subtitle timing correct. For normal sequential
+  // playback this is zero; resume/seek may have to read the already-viewed prefix.
+  if (start > 0.05) args.push('-ss', start.toFixed(3))
+
+  args.push('-map', `0:${meta.video.index}`)
+  if (audio) args.push('-map', `0:${audio.index}`)
+  else args.push('-an')
+
+  if (subtitle) {
+    const filter = `subtitles=${escapeFilterUrl(rawUrl(index))}:si=${subtitle.relativeIndex}`
+    args.push('-vf', filter)
+  }
+
+  // Always normalize the stream for the 2015 Samsung decoder/browser:
+  // H.264 + yuv420p + AAC in MPEG-TS HLS segments.
+  args.push(
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-crf', '20',
+    '-pix_fmt', 'yuv420p',
+    '-profile:v', 'high',
+    '-level:v', '4.0',
+    '-sc_threshold', '0',
+    '-force_key_frames', 'expr:gte(t,n_forced*4)'
+  )
+
+  if (audio) {
+    args.push('-c:a', 'aac', '-b:a', '160k', '-ac', '2', '-ar', '48000')
+  }
+
+  args.push(
+    '-sn',
+    '-map_metadata', '-1',
+    '-f', 'hls',
+    '-hls_time', '4',
+    '-hls_list_size', '0',
+    '-hls_segment_type', 'mpegts',
+    '-hls_flags', 'temp_file',
+    '-hls_segment_filename', segmentPattern,
+    playlistPath
+  )
+
+  console.log(`HLS [${index}] audio=${audio ? audio.code : 'none'} sub=${subtitle ? subtitle.code : 'off'} start=${start.toFixed(1)}`)
+
+  const session = {
+    id,
+    dir,
+    index: Number(index),
+    name: meta.name,
+    audio: audio ? audio.code : 'none',
+    sub: subtitle ? subtitle.code : 'off',
+    start,
+    state: 'preparing',
+    startedAt: Date.now(),
+    lastOutputAt: null,
+    ffmpegPid: null,
+    exitCode: null,
+    error: null,
+    ff: null,
+    monitor: null,
+    cleanupTimer: null,
+    lastSegmentCount: 0,
+    lastBytesOut: 0
+  }
+
+  hlsSessions.set(id, session)
+  activeHlsSession = session
+  playbackStatus = sessionSnapshot(session)
+
+  const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+  session.ff = ff
+  session.ffmpegPid = ff.pid || null
+  let stderr = ''
+
+  ff.stderr.on('data', chunk => {
+    stderr += chunk.toString('utf8')
+    if (stderr.length > 16000) stderr = stderr.slice(-16000)
+  })
+
+  session.monitor = setInterval(() => {
+    const snap = sessionSnapshot(session)
+    if (snap.segments > session.lastSegmentCount || snap.bytesOut > session.lastBytesOut) {
+      session.lastOutputAt = Date.now()
+      session.lastSegmentCount = snap.segments
+      session.lastBytesOut = snap.bytesOut
+      if (snap.segments >= 2 && session.state === 'preparing') session.state = 'ready'
+      else if (snap.segments >= 1 && session.state === 'preparing') session.state = 'buffering'
+    }
+    if (activeHlsSession === session) playbackStatus = sessionSnapshot(session)
+  }, 500)
+  if (session.monitor.unref) session.monitor.unref()
+
+  ff.on('error', err => {
+    session.state = 'error'
+    session.error = err.message
+    if (activeHlsSession === session) playbackStatus = sessionSnapshot(session)
+    console.error('ffmpeg spawn error:', err)
+  })
+
+  ff.on('close', code => {
+    session.exitCode = code
+    if (session.monitor) {
+      clearInterval(session.monitor)
+      session.monitor = null
+    }
+    const wasStopped = ['replaced', 'stopped'].includes(session.state)
+    if (!wasStopped && code && code !== 255 && code !== 143) {
+      session.state = 'error'
+      session.error = (stderr || `ffmpeg exited ${code}`).slice(-3000)
+      console.error(`ffmpeg exited ${code}:\n${stderr}`)
+    } else if (!wasStopped && session.state !== 'error') {
+      session.state = 'finished'
+    }
+    session.lastOutputAt = Date.now()
+    if (activeHlsSession === session) playbackStatus = sessionSnapshot(session)
+    scheduleHlsCleanup(session)
+  })
+
+  return sessionSnapshot(session)
+}
+
+function serveHlsFile(res, sessionId, fileName) {
+  const session = hlsSessions.get(sessionId)
+  if (!session) return sendText(res, 404, 'HLS session not found')
+  if (!/^(index\.m3u8|seg\d+\.ts)$/.test(fileName)) return sendText(res, 400, 'Bad HLS path')
+
+  const full = path.join(session.dir, fileName)
+  if (!fs.existsSync(full)) return sendText(res, 404, 'Not ready')
+
+  let body
+  try { body = fs.readFileSync(full) }
+  catch (err) { return sendText(res, 500, err.message) }
+
+  const type = fileName.endsWith('.m3u8')
+    ? 'application/vnd.apple.mpegurl'
+    : 'video/mp2t'
+  res.writeHead(200, {
+    'Content-Type': type,
+    'Content-Length': body.length,
+    'Cache-Control': fileName.endsWith('.m3u8') ? 'no-store' : 'public, max-age=3600',
+    'Access-Control-Allow-Origin': '*'
+  })
+  res.end(body)
 }
 
 function serveRaw(req, res, index) {
@@ -348,7 +444,7 @@ function serveRaw(req, res, index) {
     })
     if (req.method === 'HEAD') return res.end()
     const stream = file.createReadStream()
-    req.on('close', () => stream.destroy())
+    res.on('close', () => stream.destroy())
     stream.on('error', err => res.destroy(err))
     return stream.pipe(res)
   }
@@ -387,7 +483,7 @@ function serveRaw(req, res, index) {
   if (req.method === 'HEAD') return res.end()
 
   const stream = file.createReadStream({ start, end })
-  req.on('close', () => stream.destroy())
+  res.on('close', () => stream.destroy())
   stream.on('error', err => res.destroy(err))
   stream.pipe(res)
 }
@@ -599,13 +695,13 @@ function appHtml() {
       else setHumanStatus('Buffering — connected to peers, but no data is arriving right now.', 'status-warn');
       return;
     }
-    if (s.playback && s.playback.state === 'starting') {
-      if (s.downloadSpeed > 0) setHumanStatus('Preparing video — downloading required pieces and starting ffmpeg…', 'status-warn');
-      else setHumanStatus('Preparing video — waiting for required torrent pieces…', 'status-warn');
+    if (s.playback && (s.playback.state === 'preparing' || s.playback.state === 'buffering')) {
+      if (s.downloadSpeed > 0) setHumanStatus('Preparing Samsung-compatible HLS — generating startup segments…', 'status-warn');
+      else setHumanStatus('Preparing HLS — waiting for required torrent pieces…', 'status-warn');
       return;
     }
-    if (s.playback && s.playback.state === 'streaming' && s.playback.bytesOut > 0) {
-      setHumanStatus('Video stream is being produced; browser is waiting for enough data.', 'status-warn');
+    if (s.playback && (s.playback.state === 'ready' || s.playback.state === 'finished') && s.playback.bytesOut > 0) {
+      setHumanStatus('HLS segments are ready; browser is opening the native TV stream.', 'status-warn');
       return;
     }
     if (isPlaying) {
@@ -637,10 +733,10 @@ function appHtml() {
       } else {
         var pb = s.playback;
         var age = Math.max(0, Math.floor((Date.now() - pb.startedAt) / 1000));
-        var extra = pb.bytesOut ? ' · ' + fmtBytes(pb.bytesOut) + ' produced' : '';
+        var extra = pb.bytesOut ? ' · ' + fmtBytes(pb.bytesOut) + ' produced · ' + (pb.segments || 0) + ' HLS segments' : '';
         if (pb.lastOutputAt) extra += ' · last output ' + Math.max(0, Math.floor((Date.now() - pb.lastOutputAt) / 1000)) + 's ago';
         playerStatus.textContent = 'Player: ' + pb.state + ' · episode [' + pb.index + '] · audio=' + pb.audio + ' · subtitles=' + pb.sub + ' · ' + age + 's' + extra;
-        playerStatus.className = 'statusline small ' + (pb.state === 'error' ? 'status-bad' : (pb.state === 'streaming' ? 'status-ok' : 'status-warn'));
+        playerStatus.className = 'statusline small ' + (pb.state === 'error' ? 'status-bad' : ((pb.state === 'ready' || pb.state === 'finished') ? 'status-ok' : 'status-warn'));
       }
       refreshHumanStatus();
     });
@@ -704,6 +800,40 @@ function appHtml() {
     }
   }
 
+  function waitForHls(sessionId, playlist, automatic, attempt) {
+    attempt = attempt || 0;
+    xhrJson('/api/hls-status/' + encodeURIComponent(sessionId) + '?_=' + Date.now(), function (err, s) {
+      if (err) {
+        status.textContent = 'HLS status failed: ' + err.message;
+        browserState = 'error';
+        refreshHumanStatus();
+        return;
+      }
+      if (s.state === 'error') {
+        status.textContent = 'HLS preparation failed.';
+        browserState = 'error';
+        refreshHumanStatus();
+        return;
+      }
+      if (s.segments >= 2 || s.state === 'finished') {
+        status.textContent = 'Opening Samsung-compatible HLS stream…';
+        browserState = 'loading';
+        video.src = playlist + '?_=' + Date.now();
+        video.load();
+        isPlaying = true;
+        var p = video.play();
+        if (p && p.catch) p.catch(function () {
+          if (automatic) status.textContent = 'Press Play on the remote to continue.';
+        });
+        return;
+      }
+      status.textContent = 'Preparing HLS: ' + (s.segments || 0) + '/2 startup segments…';
+      browserState = 'waiting';
+      refreshHumanStatus();
+      setTimeout(function () { waitForHls(sessionId, playlist, automatic, attempt + 1); }, 700);
+    });
+  }
+
   function playFrom(seconds, automatic) {
     if (!meta) return;
     seconds = Math.max(0, Math.min(seconds || 0, Math.max(0, meta.duration - 1)));
@@ -711,17 +841,23 @@ function appHtml() {
     prebufferedFor = null;
     set('tms.autonext', autonext.checked ? '1' : '0');
 
-    status.textContent = 'Starting...';
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    status.textContent = 'Starting Samsung-compatible HLS…';
     browserState = 'starting';
     refreshHumanStatus();
-    var src = '/play/' + currentIndex + '?audio=' + encodeURIComponent(audio.value || '') +
+
+    var startUrl = '/api/start/' + currentIndex + '?audio=' + encodeURIComponent(audio.value || '') +
       '&sub=' + encodeURIComponent(sub.value || 'off') + '&start=' + encodeURIComponent(seconds.toFixed(3)) + '&_=' + Date.now();
-    video.src = src;
-    video.load();
-    isPlaying = true;
-    var p = video.play();
-    if (p && p.catch) p.catch(function () {
-      if (automatic) status.textContent = 'Press Play on the remote to continue.';
+    xhrJson(startUrl, function (err, data) {
+      if (err) {
+        status.textContent = 'Cannot start HLS: ' + err.message;
+        browserState = 'error';
+        refreshHumanStatus();
+        return;
+      }
+      waitForHls(data.id, data.playlist, automatic, 0);
     });
   }
 
@@ -886,8 +1022,22 @@ const server = http.createServer(async (req, res) => {
     m = url.pathname.match(/^\/raw\/(\d+)$/)
     if (m) return serveRaw(req, res, Number(m[1]))
 
-    m = url.pathname.match(/^\/play\/(\d+)$/)
-    if (m) return servePlay(req, res, Number(m[1]), url)
+    m = url.pathname.match(/^\/api\/start\/(\d+)$/)
+    if (m) {
+      if (!torrent) return sendJson(res, 503, { error: 'Torrent metadata is loading' })
+      try { return sendJson(res, 200, await startHlsSession(Number(m[1]), url)) }
+      catch (err) { return sendJson(res, 500, { error: err.message }) }
+    }
+
+    m = url.pathname.match(/^\/api\/hls-status\/([a-z0-9-]+)$/i)
+    if (m) {
+      const session = hlsSessions.get(m[1])
+      if (!session) return sendJson(res, 404, { error: 'HLS session not found' })
+      return sendJson(res, 200, sessionSnapshot(session))
+    }
+
+    m = url.pathname.match(/^\/hls\/([a-z0-9-]+)\/(index\.m3u8|seg\d+\.ts)$/i)
+    if (m) return serveHlsFile(res, m[1], m[2])
 
     return sendText(res, 404, 'Not found')
   } catch (err) {
@@ -915,6 +1065,7 @@ client.add(torrentFile, {
 
 async function shutdown() {
   console.log('\nStopping...')
+  for (const session of hlsSessions.values()) stopHlsSession(session)
   server.close()
   try { await client.destroy() } catch {}
   process.exit(0)
