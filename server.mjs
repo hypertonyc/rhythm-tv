@@ -522,7 +522,18 @@ function appHtml() {
   select, button, input { font-size:20px; padding:10px 14px; background:#222; color:#fff; border:1px solid #555; border-radius:6px; }
   button:focus, select:focus, input:focus { outline:3px solid #ddd; }
   #episode { min-width:520px; max-width:100%; }
-  video { display:block; width:100%; max-height:65vh; background:#000; margin-top:16px; }
+  video { display:block; width:100%; height:auto; max-height:65vh; background:#000; margin-top:16px; object-fit:contain; }
+  video:fullscreen,
+  video:-webkit-full-screen,
+  video:-moz-full-screen {
+    width:100vw !important;
+    height:100vh !important;
+    max-width:none !important;
+    max-height:none !important;
+    margin:0 !important;
+    object-fit:contain !important;
+    background:#000 !important;
+  }
   .grow { flex:1; }
   .small { font-size:16px; color:#aaa; }
   #seek { width:100%; box-sizing:border-box; }
@@ -593,6 +604,37 @@ function appHtml() {
   var playerStatus = document.getElementById('playerStatus');
   var lastServerStatus = null;
   var browserState = 'idle';
+
+  function setFullscreenSizing(on) {
+    if (on) {
+      video.style.width = '100vw';
+      video.style.height = '100vh';
+      video.style.maxWidth = 'none';
+      video.style.maxHeight = 'none';
+      video.style.margin = '0';
+      video.style.objectFit = 'contain';
+    } else {
+      video.style.width = '100%';
+      video.style.height = 'auto';
+      video.style.maxWidth = '';
+      video.style.maxHeight = '65vh';
+      video.style.margin = '16px 0 0';
+      video.style.objectFit = 'contain';
+    }
+  }
+
+  function syncFullscreenSizing() {
+    var fs = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+    setFullscreenSizing(fs === video || !!document.webkitIsFullScreen || !!document.mozFullScreen);
+  }
+
+  if (document.addEventListener) {
+    document.addEventListener('fullscreenchange', syncFullscreenSizing, false);
+    document.addEventListener('webkitfullscreenchange', syncFullscreenSizing, false);
+    document.addEventListener('mozfullscreenchange', syncFullscreenSizing, false);
+  }
+  video.addEventListener('webkitbeginfullscreen', function () { setFullscreenSizing(true); }, false);
+  video.addEventListener('webkitendfullscreen', function () { setFullscreenSizing(false); }, false);
 
   function get(key, fallback) {
     try {
