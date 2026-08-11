@@ -29,7 +29,8 @@ function sendJson(res, status, data) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
-    'Cache-Control': 'no-store'
+    'Cache-Control': 'no-store',
+    'Access-Control-Allow-Origin': '*'
   })
   res.end(body)
 }
@@ -38,7 +39,8 @@ function sendText(res, status, text, type = 'text/plain; charset=utf-8') {
   res.writeHead(status, {
     'Content-Type': type,
     'Content-Length': Buffer.byteLength(text),
-    'Cache-Control': 'no-store'
+    'Cache-Control': 'no-store',
+    'Access-Control-Allow-Origin': '*'
   })
   res.end(text)
 }
@@ -222,8 +224,12 @@ function sessionSnapshot(session) {
     ffmpegPid: session.ffmpegPid,
     exitCode: session.exitCode,
     error: session.error,
-    playlist: `/hls/${session.id}/${session.playlistFile || 'index.m3u8'}`,
-    format: session.sub !== 'off' ? 'HLS/MPEG-TS + WebVTT' : 'HLS/MPEG-TS',
+    // Tizen 2.3 cannot parse #EXT-X-MEDIA (introduced on Samsung TV in Tizen 2.4).
+    // Always give AVPlay the plain A/V media playlist. The app fetches the
+    // subtitle HLS rendition itself and renders WebVTT cues as an HTML overlay.
+    playlist: `/hls/${session.id}/index.m3u8`,
+    subtitlePlaylist: session.sub !== 'off' ? `/hls/${session.id}/index_vtt.m3u8` : null,
+    format: session.sub !== 'off' ? 'HLS/MPEG-TS + app-rendered WebVTT' : 'HLS/MPEG-TS',
     downloadedSinceStart: torrent ? Math.max(0, torrent.downloaded - (session.downloadedAtStart || 0)) : 0
   }
 }
@@ -343,7 +349,7 @@ async function startHlsSession(index, url) {
     audio: audio ? audio.code : 'none',
     sub: subtitle ? subtitle.code : 'off',
     start,
-    playlistFile: subtitle ? 'master.m3u8' : 'index.m3u8',
+    playlistFile: 'index.m3u8',
     downloadedAtStart: torrent ? torrent.downloaded : 0,
     state: 'preparing',
     startedAt: Date.now(),
@@ -1054,6 +1060,15 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
 
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET,HEAD,OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Range'
+      })
+      return res.end()
+    }
+
     if (url.pathname === '/') return sendText(res, 200, appHtml(), 'text/html; charset=utf-8')
 
     if (url.pathname === '/api/files') {
@@ -1071,6 +1086,19 @@ const server = http.createServer(async (req, res) => {
         progress: torrent.progress,
         playback: playbackStatus
       })
+    }
+
+    if (url.pathname === '/api/stop') {
+      if (activeHlsSession) {
+        const session = activeHlsSession
+        stopHlsSession(session, 'stopped')
+        session.lastOutputAt = Date.now()
+        playbackStatus = sessionSnapshot(session)
+        activeHlsSession = null
+        scheduleHlsCleanup(session, 2 * 60 * 1000)
+        return sendJson(res, 200, { ok: true, stopped: session.id })
+      }
+      return sendJson(res, 200, { ok: true, stopped: null })
     }
 
     let m = url.pathname.match(/^\/api\/probe\/(\d+)$/)
