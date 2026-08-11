@@ -246,9 +246,16 @@ function stopHlsSession(session, reason = 'stopped') {
   }
 }
 
-function scheduleHlsCleanup(session, delayMs = 10 * 60 * 1000) {
+function scheduleHlsCleanup(session, delayMs = 2 * 60 * 1000) {
   if (!session || session.cleanupTimer) return
   session.cleanupTimer = setTimeout(() => {
+    session.cleanupTimer = null
+
+    // Never delete the HLS files of the session the TV is currently using.
+    // ffmpeg can finish transcoding a whole episode much faster than realtime;
+    // the player may still need those already-generated segments for many minutes.
+    if (activeHlsSession === session) return
+
     hlsSessions.delete(session.id)
     safeRm(session.dir)
   }, delayMs)
@@ -413,8 +420,12 @@ async function startHlsSession(index, url) {
       session.state = 'finished'
     }
     session.lastOutputAt = Date.now()
-    if (activeHlsSession === session) playbackStatus = sessionSnapshot(session)
-    scheduleHlsCleanup(session)
+    if (activeHlsSession === session) {
+      playbackStatus = sessionSnapshot(session)
+      console.log(`HLS [${session.index}] generation finished; keeping active session ${session.id} until playback stops or is replaced`)
+    } else {
+      scheduleHlsCleanup(session)
+    }
   })
 
   return sessionSnapshot(session)
