@@ -45,98 +45,6 @@ function sendText(res, status, text, type = 'text/plain; charset=utf-8') {
   res.end(text)
 }
 
-
-function parseVttTimestamp(value) {
-  const parts = String(value || '').trim().split(':')
-  let h = 0, m = 0, sec = 0
-  if (parts.length === 3) {
-    h = Number(parts[0]) || 0
-    m = Number(parts[1]) || 0
-    sec = Number(parts[2]) || 0
-  } else if (parts.length === 2) {
-    m = Number(parts[0]) || 0
-    sec = Number(parts[1]) || 0
-  } else return 0
-  return h * 3600 + m * 60 + sec
-}
-
-function stripVttMarkupServer(text) {
-  return String(text || '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-}
-
-function parseVttServer(text) {
-  const blocks = String(text || '').replace(/\r/g, '').split(/\n\s*\n/)
-  const cues = []
-  for (const block of blocks) {
-    const lines = block.split('\n')
-    const arrow = lines.findIndex(line => line.includes('-->'))
-    if (arrow < 0) continue
-    const timing = lines[arrow].split('-->')
-    if (timing.length < 2) continue
-    const left = timing[0].trim()
-    const right = timing[1].trim().split(/\s+/)[0]
-    const start = parseVttTimestamp(left)
-    const end = parseVttTimestamp(right)
-    const body = stripVttMarkupServer(lines.slice(arrow + 1).join('\n'))
-    if (body && end > start) cues.push({ start, end, text: body })
-  }
-  return cues
-}
-
-function subtitleDelta(session, after = -1) {
-  if (!session || session.sub === 'off') {
-    return { enabled: false, after: -1, lastSegment: -1, segments: [], generatedThrough: 0 }
-  }
-
-  let names = []
-  try { names = fs.readdirSync(session.dir) } catch {}
-
-  const files = names
-    .map(name => {
-      const m = name.match(/^index(\d+)\.vtt$/i)
-      return m ? { name, index: Number(m[1]) } : null
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.index - b.index)
-
-  const segments = []
-  let generatedThrough = 0
-  for (const item of files) {
-    if (item.index <= after) continue
-    try {
-      const text = fs.readFileSync(path.join(session.dir, item.name), 'utf8')
-      const cues = parseVttServer(text)
-      for (const cue of cues) generatedThrough = Math.max(generatedThrough, cue.end)
-      segments.push({ index: item.index, cues })
-    } catch {}
-  }
-
-  // Also report the furthest timestamp we can see in already-emitted files,
-  // useful for diagnostics when the TV is ahead of subtitle generation.
-  if (!segments.length && files.length) {
-    try {
-      const tail = files[files.length - 1]
-      const cues = parseVttServer(fs.readFileSync(path.join(session.dir, tail.name), 'utf8'))
-      for (const cue of cues) generatedThrough = Math.max(generatedThrough, cue.end)
-    } catch {}
-  }
-
-  return {
-    enabled: true,
-    after,
-    lastSegment: files.length ? files[files.length - 1].index : -1,
-    files: files.length,
-    generatedThrough,
-    segments
-  }
-}
-
 function getFile(index) {
   if (!torrent) return null
   const n = Number(index)
@@ -321,7 +229,6 @@ function sessionSnapshot(session) {
     // subtitle HLS rendition itself and renders WebVTT cues as an HTML overlay.
     playlist: `/hls/${session.id}/index.m3u8`,
     subtitlePlaylist: session.sub !== 'off' ? `/hls/${session.id}/index_vtt.m3u8` : null,
-    subtitleApi: session.sub !== 'off' ? `/api/subtitles/${session.id}` : null,
     format: session.sub !== 'off' ? 'HLS/MPEG-TS + app-rendered WebVTT' : 'HLS/MPEG-TS',
     downloadedSinceStart: torrent ? Math.max(0, torrent.downloaded - (session.downloadedAtStart || 0)) : 0
   }
@@ -1215,15 +1122,6 @@ const server = http.createServer(async (req, res) => {
       if (!torrent) return sendJson(res, 503, { error: 'Torrent metadata is loading' })
       try { return sendJson(res, 200, await startHlsSession(Number(m[1]), url)) }
       catch (err) { return sendJson(res, 500, { error: err.message }) }
-    }
-
-    m = url.pathname.match(/^\/api\/subtitles\/([a-z0-9-]+)$/i)
-    if (m) {
-      const session = hlsSessions.get(m[1])
-      if (!session) return sendJson(res, 404, { error: 'HLS session not found' })
-      const rawAfter = Number(url.searchParams.get('after'))
-      const after = Number.isFinite(rawAfter) ? Math.max(-1, rawAfter) : -1
-      return sendJson(res, 200, subtitleDelta(session, after))
     }
 
     m = url.pathname.match(/^\/api\/hls-status\/([a-z0-9-]+)$/i)
