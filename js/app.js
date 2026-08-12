@@ -4,8 +4,10 @@
 (function () {
     'use strict';
 
-    /* Edit this to your Mac's LAN address if you want zero setup on the TV. */
-    var DEFAULT_SERVER = 'https://media.example.com/REDACTED';
+    /* Baked in at package time from DEFAULT_SERVER in .env, via the generated
+     * js/config.js. Entering an address with the remote is painful, so the TV
+     * should never have to; empty only means we fall back to the setup screen. */
+    var DEFAULT_SERVER = (window.RTV_CONFIG && window.RTV_CONFIG.defaultServer) || '';
 
     var serverBase = '';
     var episodes = [];
@@ -22,8 +24,6 @@
     var startOffset = 0;
     var lastPlayerTime = 0;
     var lastSavedAt = 0;
-    var hlsSessionId = null;
-    var currentPlaylist = '';
     var prebufferedFor = null;
     var hudTimer = null;
     var statusTimer = null;
@@ -442,7 +442,6 @@
             return {
                 index: file.index,
                 name: file.name,
-                title: m[3],
                 season: Number(m[1]),
                 episode: Number(m[2]),
                 label: 'S' + (m[1].length < 2 ? '0' + m[1] : m[1]) + 'E' + (m[2].length < 2 ? '0' + m[2] : m[2]) + ' — ' + m[3]
@@ -451,7 +450,6 @@
         return {
             index: file.index,
             name: file.name,
-            title: file.name.replace(/\.[^.]+$/, ''),
             season: 999,
             episode: 1,
             label: file.name.replace(/\.[^.]+$/, '')
@@ -796,23 +794,8 @@
         }
     }
 
-    function trySelectTextTrack() {
-        if (selectedSubCode() === 'off') return;
-        try {
-            var tracks = webapis.avplay.getTotalTrackInfo();
-            var i;
-            for (i = 0; i < tracks.length; i++) {
-                if (tracks[i].type === 'TEXT') {
-                    try { webapis.avplay.setSelectTrack('TEXT', tracks[i].index); } catch (e) {}
-                    return;
-                }
-            }
-        } catch (e2) {}
-    }
-
     function openPlaylist(url) {
         closeAvplay();
-        currentPlaylist = url;
         lastPlayerTime = 0;
         el('av-player').style.display = 'block';
         el('playerScreen').className = 'player-screen';
@@ -846,7 +829,7 @@
         }
     }
 
-    function waitForHls(sessionId, playlist, attempt) {
+    function waitForHls(sessionId, playlist) {
         if (mode !== 'player' && !restarting) return;
         api('/api/hls-status/' + encodeURIComponent(sessionId) + '?_=' + new Date().getTime(), function (err, s) {
             if (err) {
@@ -864,7 +847,7 @@
                 return;
             }
             showHud('Preparing HLS: ' + (s.segments || 0) + '/2 startup segments…');
-            setTimeout(function () { waitForHls(sessionId, playlist, attempt + 1); }, 700);
+            setTimeout(function () { waitForHls(sessionId, playlist); }, 700);
         }, 12000);
     }
 
@@ -896,9 +879,8 @@
                 showHud('Cannot start HLS: ' + err.message);
                 return;
             }
-            hlsSessionId = data.id;
             startSubtitleOverlay(data.subtitlePlaylist || '');
-            waitForHls(data.id, data.playlist, 0);
+            waitForHls(data.id, data.playlist);
         }, 30000);
     }
 
@@ -945,8 +927,6 @@
         restarting = false;
         closeAvplay();
         apiIgnore('/api/stop');
-        hlsSessionId = null;
-        currentPlaylist = '';
         resetSubtitles();
         el('av-player').style.display = 'none';
         if (toMenu) {

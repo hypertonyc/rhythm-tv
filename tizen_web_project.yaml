@@ -29,9 +29,9 @@ trust_anchor: []
 files:
   - css/style.css
   - js/app.js
+  - js/config.js
   - icon.png
   - index.html
-  - main.js
 
 # list of files to exclude based on the matched patterns
 excludes:
@@ -59,7 +59,6 @@ excludes:
   - \.gn
   - \.obj/.*
   - \.package/.*
-  - \.project
   - \.rds_delta
   - \.sdk_delta.info
   - \.settings/.*

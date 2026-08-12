@@ -1,19 +1,42 @@
-# Rhythm TV client v8-clean
+# Rhythm TV
 
-Cleaned version after subtitle debugging.
+Клиент для Samsung Smart TV (Tizen 2.3, телевизоры 2015 года). Показывает библиотеку
+сериалов с медиасервера, играет HLS через AVPlay и рисует субтитры поверх видео.
+Сервер живёт в отдельном репозитории — здесь только приложение для телевизора.
 
-Kept:
-- original v2 WebVTT playlist/segment subtitle transport (known working)
-- Tizen 2.3 AVPlay plain A/V HLS playlist workaround
-- subtitle size setting
-- Canvas subtitle renderer with translucent background (fixes old Tizen compositor issue)
-- CORS and /api/stop on the server
+## Что умеет
 
-Removed:
-- AVPlay-driven extra subtitle polling from v4
-- server JSON subtitle parsing/API from v5
-- full subtitle snapshot polling from v6
-- related cursors/diagnostic state
+- список сезонов и эпизодов, разбор имён вида `S01E02 - Название.mkv`;
+- выбор аудиодорожки и субтитров, размер субтитров, автопереход к следующему эпизоду;
+- запоминание позиции просмотра по каждому эпизоду (localStorage);
+- перемотка ±30 с, пауза, HUD с таймингом и состоянием сервера;
+- экран настройки адреса сервера — на случай, если запечённый адрес недоступен.
 
-Replace client index.html, css/style.css, js/app.js.
-If your server is currently v5/v7, replace it with server-tizen.mjs and rebuild Docker.
+## Сборка и установка
+
+Нужны Tizen SDK tools и сертификат для подписи. Скопируйте `.env.example` в `.env`
+и заполните пути, адрес телевизора, профиль подписи и `DEFAULT_SERVER`.
+
+В VS Code: **Run Build Task** → `Tizen: Build & Install on TV`. Задача подключается
+к телевизору по sdb, генерирует `js/config.js` из `.env`, чистит `Debug/`, собирает
+и подписывает `.wgt`, проверяет содержимое пакета и ставит его на телевизор.
+
+`DEFAULT_SERVER` запекается в пакет как `js/config.js`, чтобы не вводить адрес
+с пульта. Файл в `.gitignore` — адрес сервера не попадает в репозиторий.
+
+## Структура
+
+| Файл | Что внутри |
+|---|---|
+| `index.html` | разметка трёх экранов: настройка, меню, плеер |
+| `js/app.js` | вся логика приложения, один IIFE, строго ES5 |
+| `js/config.js` | генерируется при сборке из `.env`, в git не хранится |
+| `css/style.css` | стили под фиксированные 1920×1080 |
+| `config.xml` | манифест виджета Tizen: id, привилегии, версия |
+| `tizen_web_project.yaml` | список файлов для упаковки в `.wgt` |
+
+Новый файл, добавленный в проект, надо вписать в `files:` в
+`tizen_web_project.yaml` — иначе он не попадёт в пакет.
+
+Технические ограничения платформы и неочевидные решения в коде описаны в
+[CLAUDE.md](CLAUDE.md).

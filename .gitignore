@@ -4,3 +4,4 @@
 .buildResult/
 Debug/
 .env
+js/config.js

@@ -221,6 +221,7 @@ html, body {
     left: 0;
     right: 0;
     bottom: 0;
+    z-index: 30;
     height: 245px;
     box-sizing: border-box;
     padding: 35px 65px;
@@ -286,5 +287,3 @@ html, body {
     z-index: 40;
     pointer-events: none;
 }
-
-.player-hud { z-index: 30; }

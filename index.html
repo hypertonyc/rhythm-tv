@@ -61,6 +61,9 @@
 
     <div id="fatal" class="fatal hidden"></div>
 
+    <!-- Generated from .env at build time; absent in a fresh checkout, which is
+         harmless — app.js then falls back to an empty default server. -->
+    <script type="text/javascript" src="js/config.js"></script>
     <script type="text/javascript" src="js/app.js"></script>
 </body>
 </html>
