@@ -37,6 +37,15 @@ files:
 excludes:
   - Build/*
   - Debug/*
+  - .git/*
+  - .vscode/*
+  - \.git
+  - \.git/.*
+  - \.gitignore
+  - \.env
+  - \.env\.example
+  - \.vscode/.*
+  - README\.md
   - Directory.Build.targets
   - Release/*
   - Test/*
