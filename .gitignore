@@ -1,7 +1,12 @@
 .DS_Store
-*.wgt
-.sign/
-.buildResult/
-Debug/
 .env
-js/config.js
+
+# Результат сборки Tizen-клиента
+Debug/
+Release/
+.buildResult/
+.sign/
+*.wgt
+
+# Генерируется задачей сборки из DEFAULT_SERVER в .env (адрес с приватным токеном)
+client/js/config.js
