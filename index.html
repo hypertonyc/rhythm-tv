@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1920, initial-scale=1.0">
+    <title>Rhythm TV</title>
+    <script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <object id="av-player" type="application/avplayer"></object>
+
+    <div id="setupScreen" class="screen hidden">
+        <div class="panel setup-panel">
+            <div class="brand">Rhythm TV</div>
+            <div class="setup-title">Media server</div>
+            <div class="setup-text">Enter the Mac server address, for example:</div>
+            <div class="setup-example">http://192.168.1.105:8000</div>
+            <input id="serverInput" class="server-input" type="text" value="">
+            <div id="setupConnect" class="setup-button">Connect</div>
+            <div id="setupStatus" class="status error"></div>
+            <div class="help">↑ ↓ — select · Enter — edit/connect · Back — exit</div>
+        </div>
+    </div>
+
+    <div id="menuScreen" class="screen hidden">
+        <div class="header">
+            <div id="torrentTitle" class="brand">Rhythm TV</div>
+            <div id="serverStatus" class="server-status">Connecting…</div>
+        </div>
+
+        <div class="panel menu-panel">
+            <div id="episodeTitle" class="episode-title">Loading episodes…</div>
+            <div id="episodeMeta" class="episode-meta"></div>
+
+            <div id="row-season" class="menu-row"><span class="label">Season</span><span id="seasonValue" class="value"></span></div>
+            <div id="row-episode" class="menu-row"><span class="label">Episode</span><span id="episodeValue" class="value"></span></div>
+            <div id="row-audio" class="menu-row"><span class="label">Audio</span><span id="audioValue" class="value"></span></div>
+            <div id="row-sub" class="menu-row"><span class="label">Subtitles</span><span id="subValue" class="value"></span></div>
+            <div id="row-subsize" class="menu-row"><span class="label">Subtitle size</span><span id="subtitleSizeValue" class="value"></span></div>
+            <div id="row-autonext" class="menu-row"><span class="label">Auto next</span><span id="autonextValue" class="value"></span></div>
+            <div id="row-play" class="menu-row action-row"><span class="label">Play</span><span id="playValue" class="value"></span></div>
+            <div id="row-server" class="menu-row"><span class="label">Server</span><span id="serverValue" class="value"></span></div>
+
+            <div id="menuStatus" class="status"></div>
+            <div class="help">↑ ↓ — move · ← → — change · Enter — select · Back — exit</div>
+        </div>
+    </div>
+
+    <div id="playerScreen" class="player-screen hidden">
+        <canvas id="subtitleCanvas" class="subtitle-canvas"></canvas>
+        <div id="playerHud" class="player-hud">
+            <div id="hudTitle" class="hud-title"></div>
+            <div id="hudStatus" class="hud-status"></div>
+            <div class="hud-bottom">
+                <span id="hudClock">00:00 / 00:00</span>
+                <span class="hud-help">← −30s · Enter Play/Pause · → +30s · Back menu</span>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/javascript" src="js/app.js"></script>
+</body>
+</html>

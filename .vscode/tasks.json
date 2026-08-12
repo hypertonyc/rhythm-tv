@@ -1,0 +1,20 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Tizen: Build & Install on TV",
+      "type": "shell",
+      "command": "set -euo pipefail; PROJECT=\"${workspaceFolder}\"; set -a; source \"$PROJECT/.env\"; set +a; BUILD=\"$PROJECT/$BUILD_DIR\"; echo '=== Clean ==='; rm -rf \"$BUILD\"; echo '=== Build ==='; \"$TIZEN\" build-web -- \"$PROJECT\"; echo '=== Package & sign ==='; \"$TIZEN\" package -t wgt -s \"$PROFILE\" -- \"$BUILD\"; WGT=\"$(find \"$BUILD\" -maxdepth 1 -type f -name '*.wgt' -print -quit)\"; if [ -z \"$WGT\" ]; then echo 'ERROR: WGT not found'; exit 1; fi; echo \"WGT: $WGT\"; echo '=== Install ==='; \"$TIZEN\" install -s \"$TV\" -n \"$(basename \"$WGT\")\" -- \"$(dirname \"$WGT\")\"; echo '=== DONE ==='",
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    }
+  ]
+}

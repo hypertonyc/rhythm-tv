@@ -1,0 +1,6 @@
+.DS_Store
+*.wgt
+.sign/
+.buildResult/
+Debug/
+.env

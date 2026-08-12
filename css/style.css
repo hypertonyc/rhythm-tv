@@ -1,0 +1,271 @@
+html, body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: #0c0d0f;
+    color: #f4f4f4;
+    font-family: Arial, Helvetica, sans-serif;
+}
+
+.hidden { display: none !important; }
+
+#av-player {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 1;
+    display: none;
+    background: #000;
+}
+
+.screen {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 10;
+    background: #0c0d0f;
+}
+
+.header {
+    position: absolute;
+    left: 70px;
+    top: 42px;
+    right: 70px;
+    height: 72px;
+}
+
+.brand {
+    font-size: 46px;
+    font-weight: bold;
+    line-height: 60px;
+}
+
+.server-status {
+    position: absolute;
+    right: 0;
+    top: 12px;
+    font-size: 24px;
+    color: #a7abb3;
+    text-align: right;
+}
+
+.panel {
+    background: #17191d;
+    border: 1px solid #343840;
+    border-radius: 12px;
+    box-sizing: border-box;
+}
+
+.menu-panel {
+    position: absolute;
+    left: 220px;
+    top: 145px;
+    width: 1480px;
+    min-height: 820px;
+    padding: 44px 58px;
+}
+
+.episode-title {
+    font-size: 38px;
+    font-weight: bold;
+    margin-bottom: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.episode-meta {
+    height: 34px;
+    margin-bottom: 30px;
+    color: #9da3ad;
+    font-size: 24px;
+}
+
+.menu-row {
+    position: relative;
+    height: 70px;
+    line-height: 70px;
+    padding: 0 24px;
+    margin: 7px 0;
+    border: 3px solid transparent;
+    border-radius: 8px;
+    background: #202329;
+    box-sizing: border-box;
+    font-size: 30px;
+}
+
+.menu-row.focused {
+    border-color: #ffffff;
+    background: #30343c;
+}
+
+.menu-row .label {
+    display: inline-block;
+    width: 285px;
+    color: #b9bec7;
+}
+
+.menu-row .value {
+    position: absolute;
+    left: 335px;
+    right: 24px;
+    color: #ffffff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.action-row {
+    background: #282c33;
+}
+
+.status {
+    min-height: 34px;
+    margin-top: 22px;
+    font-size: 24px;
+    color: #a7abb3;
+}
+
+.status.ok { color: #78d578; }
+.status.warn { color: #ffd166; }
+.status.error { color: #ff7878; }
+
+.help {
+    position: absolute;
+    left: 58px;
+    bottom: 30px;
+    color: #777e89;
+    font-size: 22px;
+}
+
+.setup-panel {
+    position: absolute;
+    left: 360px;
+    top: 190px;
+    width: 1200px;
+    min-height: 690px;
+    padding: 60px;
+}
+
+.setup-title {
+    font-size: 34px;
+    margin-top: 46px;
+    margin-bottom: 18px;
+}
+
+.setup-text, .setup-example {
+    font-size: 25px;
+    color: #a7abb3;
+    margin-bottom: 15px;
+}
+
+.setup-example {
+    font-family: monospace;
+    color: #d3d6dc;
+}
+
+.server-input {
+    display: block;
+    width: 100%;
+    height: 72px;
+    box-sizing: border-box;
+    margin-top: 32px;
+    margin-bottom: 22px;
+    padding: 0 20px;
+    font-size: 30px;
+    color: #fff;
+    background: #202329;
+    border: 3px solid #555b66;
+    border-radius: 8px;
+}
+
+.server-input.focused, .server-input:focus {
+    border-color: #fff;
+    outline: none;
+}
+
+.setup-button {
+    width: 260px;
+    height: 68px;
+    line-height: 68px;
+    text-align: center;
+    font-size: 29px;
+    background: #282c33;
+    border: 3px solid transparent;
+    border-radius: 8px;
+}
+
+.setup-button.focused {
+    border-color: #fff;
+    background: #363b45;
+}
+
+.player-screen {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 20;
+    background: transparent;
+}
+
+.player-hud {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 245px;
+    box-sizing: border-box;
+    padding: 35px 65px;
+    background: rgba(0, 0, 0, 0.78);
+}
+
+.player-hud.hidden-hud { display: none; }
+
+.hud-title {
+    font-size: 34px;
+    font-weight: bold;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.hud-status {
+    height: 42px;
+    margin-top: 14px;
+    font-size: 25px;
+    color: #ffd166;
+}
+
+.hud-bottom {
+    position: absolute;
+    left: 65px;
+    right: 65px;
+    bottom: 34px;
+    font-size: 25px;
+}
+
+.hud-help {
+    float: right;
+    color: #b7bbc2;
+}
+
+
+.subtitle-canvas {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 40;
+    pointer-events: none;
+}
+
+.player-hud { z-index: 30; }
