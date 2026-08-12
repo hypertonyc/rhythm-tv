@@ -39,6 +39,9 @@ excludes:
   - Debug/*
   - .git/*
   - .vscode/*
+  - .DS_Store
+  - \.DS_Store
+  - .*/\.DS_Store
   - \.git
   - \.git/.*
   - \.gitignore
