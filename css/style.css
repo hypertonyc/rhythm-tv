@@ -258,6 +258,25 @@ html, body {
 }
 
 
+/* Startup/JS failures must be readable on the TV instead of showing a black screen. */
+.fatal {
+    position: absolute;
+    left: 60px;
+    right: 60px;
+    top: 60px;
+    z-index: 100;
+    padding: 26px 30px;
+    box-sizing: border-box;
+    background: #4a1414;
+    border: 3px solid #ff7878;
+    border-radius: 10px;
+    color: #ffdede;
+    font-family: monospace;
+    font-size: 24px;
+    line-height: 32px;
+    word-wrap: break-word;
+}
+
 .subtitle-canvas {
     position: absolute;
     left: 0;

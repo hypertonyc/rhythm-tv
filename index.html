@@ -10,7 +10,7 @@
 <body>
     <object id="av-player" type="application/avplayer"></object>
 
-    <div id="setupScreen" class="screen hidden">
+    <div id="setupScreen" class="screen">
         <div class="panel setup-panel">
             <div class="brand">Rhythm TV</div>
             <div class="setup-title">Media server</div>
@@ -18,7 +18,7 @@
             <div class="setup-example">http://192.168.1.105:8000</div>
             <input id="serverInput" class="server-input" type="text" value="">
             <div id="setupConnect" class="setup-button">Connect</div>
-            <div id="setupStatus" class="status error"></div>
+            <div id="setupStatus" class="status error">Starting…</div>
             <div class="help">↑ ↓ — select · Enter — edit/connect · Back — exit</div>
         </div>
     </div>
@@ -58,6 +58,8 @@
             </div>
         </div>
     </div>
+
+    <div id="fatal" class="fatal hidden"></div>
 
     <script type="text/javascript" src="js/app.js"></script>
 </body>

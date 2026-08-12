@@ -2,7 +2,7 @@
 project_type: web_app
 
 # Default profile, Tizen API version
-profile: tv
+profile: tv-samsung
 api_version: "2.3"
 
 # Build type [Debug/ Release/ Test]
@@ -28,6 +28,7 @@ trust_anchor: []
 # list of files in web project (.html,.css etc) and resources
 files:
   - css/style.css
+  - js/app.js
   - icon.png
   - index.html
   - main.js

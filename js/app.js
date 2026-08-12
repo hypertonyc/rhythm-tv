@@ -45,6 +45,26 @@
 
     function el(id) { return document.getElementById(id); }
 
+    function escapeHtml(value) {
+        return String(value === null || value === undefined ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    /* The TV gives us no console, so anything fatal goes on screen. */
+    function fatal(message) {
+        var box = el('fatal');
+        if (!box) return;
+        box.className = 'fatal';
+        box.innerHTML = escapeHtml(message);
+    }
+
+    window.onerror = function (message, source, line) {
+        fatal('JS error: ' + message + '\n' + source + ':' + line);
+        return false;
+    };
+
     function storeGet(key, fallback) {
         try {
             var v = localStorage.getItem(key);
@@ -86,24 +106,49 @@
         return value;
     }
 
+    /* Wraps a request so exactly one callback always happens. On this WRT a request
+     * refused by WARP can end without firing onerror/ontimeout at all, which would
+     * otherwise leave the caller waiting forever. */
+    function guardedRequest(xhr, url, timeout, callback) {
+        var settled = false;
+        var watchdog = setTimeout(function () {
+            if (settled) return;
+            settled = true;
+            try { xhr.abort(); } catch (e) {}
+            callback(new Error('No response from ' + url));
+        }, timeout + 1500);
+
+        return function settle(err, data) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(watchdog);
+            callback(err, data);
+        };
+    }
+
     function api(path, callback, timeout) {
         var xhr = new XMLHttpRequest();
         var url = serverBase + path;
+        var settle;
+        timeout = timeout || 12000;
+        settle = guardedRequest(xhr, url, timeout, callback);
         xhr.open('GET', url, true);
-        xhr.timeout = timeout || 12000;
+        xhr.timeout = timeout;
         xhr.onreadystatechange = function () {
             if (xhr.readyState !== 4) return;
             if (xhr.status >= 200 && xhr.status < 300) {
-                try { callback(null, JSON.parse(xhr.responseText)); }
-                catch (e) { callback(new Error('Bad JSON from server')); }
+                var parsed;
+                try { parsed = JSON.parse(xhr.responseText); }
+                catch (e) { settle(new Error('Bad JSON from ' + path)); return; }
+                settle(null, parsed);
             } else {
-                callback(new Error('HTTP ' + xhr.status + ' for ' + path));
+                settle(new Error('HTTP ' + xhr.status + ' for ' + path));
             }
         };
-        xhr.onerror = function () { callback(new Error('Network error: ' + url)); };
-        xhr.ontimeout = function () { callback(new Error('Timeout: ' + url)); };
+        xhr.onerror = function () { settle(new Error('Network error: ' + url)); };
+        xhr.ontimeout = function () { settle(new Error('Timeout: ' + url)); };
         try { xhr.send(); }
-        catch (e) { callback(e); }
+        catch (e) { settle(e); }
     }
 
     function apiIgnore(path) {
@@ -112,16 +157,19 @@
 
     function xhrText(url, callback, timeout) {
         var xhr = new XMLHttpRequest();
+        var settle;
+        timeout = timeout || 8000;
+        settle = guardedRequest(xhr, url, timeout, callback);
         xhr.open('GET', url, true);
-        xhr.timeout = timeout || 8000;
+        xhr.timeout = timeout;
         xhr.onreadystatechange = function () {
             if (xhr.readyState !== 4) return;
-            if (xhr.status >= 200 && xhr.status < 300) callback(null, xhr.responseText || '');
-            else callback(new Error('HTTP ' + xhr.status + ' for ' + url));
+            if (xhr.status >= 200 && xhr.status < 300) settle(null, xhr.responseText || '');
+            else settle(new Error('HTTP ' + xhr.status + ' for ' + url));
         };
-        xhr.onerror = function () { callback(new Error('Network error: ' + url)); };
-        xhr.ontimeout = function () { callback(new Error('Timeout: ' + url)); };
-        try { xhr.send(); } catch (e) { callback(e); }
+        xhr.onerror = function () { settle(new Error('Network error: ' + url)); };
+        xhr.ontimeout = function () { settle(new Error('Timeout: ' + url)); };
+        try { xhr.send(); } catch (e) { settle(e); }
     }
 
     function parseVttTime(value) {
@@ -519,6 +567,7 @@
 
     function setStatus(text, kind) {
         var s = el('menuStatus');
+        if (!s) return;
         s.className = 'status' + (kind ? ' ' + kind : '');
         s.innerHTML = text || '';
     }
@@ -1052,6 +1101,10 @@
         autoNext = storeGet('rtv.autonext', '1') !== '0';
         loadSubtitleSize();
 
+        /* Put a screen up before touching the network — a slow or refused request
+         * must never leave the TV on a black screen. */
+        showSetup('Connecting to ' + serverBase + '…');
+
         /* Verify AVPlay before attempting network access. */
         if (!window.webapis || !webapis.avplay) {
             showSetup('AVPlay is not available on this TV.');
@@ -1059,10 +1112,22 @@
         }
 
         api('/api/files', function (err, data) {
-            if (err) showSetup('Cannot reach ' + serverBase + '. Check the Mac IP and server.');
+            if (err) showSetup('Cannot reach ' + serverBase + ' — ' + err.message);
             else loadLibrary(data);
         }, 12000);
     }
 
-    window.onload = boot;
+    var booted = false;
+    function bootOnce() {
+        if (booted) return;
+        booted = true;
+        try { boot(); }
+        catch (e) { fatal('Startup failed: ' + (e && e.message ? e.message : String(e))); }
+    }
+
+    /* Boot on whichever of these the WRT actually delivers: window.onload does not
+     * fire on every Tizen build once the avplayer object is in the document. */
+    if (document.addEventListener) document.addEventListener('DOMContentLoaded', bootOnce, false);
+    window.onload = bootOnce;
+    setTimeout(bootOnce, 2000);
 })();
