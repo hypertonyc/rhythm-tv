@@ -6,6 +6,15 @@ import path from 'node:path'
 import os from 'node:os'
 
 const PORT = Number(process.env.PORT || 8000)
+// Чуть меньше, чем XHR-таймаут телевизора на /api/probe (30 с), чтобы клиент
+// получил внятную ошибку от сервера, а не сработал своим сторожевым таймером.
+const PROBE_TIMEOUT_MS = Number(process.env.PROBE_TIMEOUT_MS || 25000)
+// HLS_ALLOW_COPY=0 возвращает безусловное перекодирование — на случай, если
+// телевизор всё-таки споткнётся о какой-нибудь «совместимый» поток.
+const ALLOW_COPY = process.env.HLS_ALLOW_COPY !== '0'
+// Куски торрента; каталог удаляется при завершении процесса
+// (destroyStoreOnDestroy ниже), так что перезапуск качает эпизод заново.
+const TORRENT_STORE = process.env.TORRENT_STORE || path.join(os.tmpdir(), 'webtorrent')
 const torrentFile = process.argv[2]
 
 if (!torrentFile) {
@@ -16,14 +25,17 @@ if (!torrentFile) {
 const client = new WebTorrent()
 let torrent = null
 const probeCache = new Map()
+const probeInflight = new Map()
 const prebuffering = new Set()
-let playbackStatus = null
 const hlsSessions = new Map()
 let activeHlsSession = null
 
 client.on('error', err => console.error('WebTorrent error:', err))
 client.on('warning', err => console.warn('WebTorrent warning:', err.message || err))
 
+// Access-Control-Allow-Origin: * стоит на всех ответах сознательно: виджет
+// Tizen ходит сюда кросс-ориджином. Своей авторизации у сервера нет вообще —
+// он рассчитан на публикацию через reverse-proxy с токеном в пути.
 function sendJson(res, status, data) {
   const body = JSON.stringify(data)
   res.writeHead(status, {
@@ -59,62 +71,127 @@ function videoFiles() {
     .filter(x => /\.(mp4|m4v|mkv|webm)$/i.test(x.name))
 }
 
-function nextVideoIndex(index) {
-  const list = videoFiles()
-  const pos = list.findIndex(x => x.index === Number(index))
+function nextVideoIndex(index, list = videoFiles()) {
+  const pos = list.findIndex(x => x.index === index)
   return pos >= 0 && pos + 1 < list.length ? list[pos + 1].index : null
 }
 
-function prevVideoIndex(index) {
-  const list = videoFiles()
-  const pos = list.findIndex(x => x.index === Number(index))
+function prevVideoIndex(index, list = videoFiles()) {
+  const pos = list.findIndex(x => x.index === index)
   return pos > 0 ? list[pos - 1].index : null
+}
+
+// Латиница и кириллица проверяются разными шаблонами не для красоты: `\b` в JS
+// определён через `\w` = [A-Za-z0-9_], поэтому вокруг кириллических букв
+// границы слова не существует и /\bрус\b/ не совпадает ни с чем никогда.
+const LANGUAGES = [
+  { code: 'rus', label: 'Russian', latin: /\b(rus|ru|russian)\b/, cyrillic: /рус/ },
+  { code: 'eng', label: 'English', latin: /\b(eng|en|english)\b/, cyrillic: /англ/ },
+  { code: 'tha', label: 'Thai', latin: /\b(tha|th|thai)\b/, cyrillic: /тай/ }
+]
+
+function trackTitle(tags) {
+  const title = String(tags.title || '').replace(/\s+/g, ' ').trim()
+  return title.length > 40 ? `${title.slice(0, 39)}…` : title
 }
 
 function normalizeLanguage(stream, ordinal, kind) {
   const tags = stream.tags || {}
   const raw = String(tags.language || '').toLowerCase()
-  const title = String(tags.title || '').toLowerCase()
-  const haystack = `${raw} ${title}`
+  const title = trackTitle(tags)
+  const haystack = `${raw} ${title.toLowerCase()}`
 
-  if (/\b(rus|ru|russian|рус|русский)\b/.test(haystack)) return { code: 'rus', label: 'Russian' }
-  if (/\b(eng|en|english|англ|английский)\b/.test(haystack)) return { code: 'eng', label: 'English' }
-  if (/\b(tha|th|thai)\b/.test(haystack)) return { code: 'tha', label: 'Thai' }
+  for (const lang of LANGUAGES) {
+    if (!lang.latin.test(haystack) && !lang.cyrillic.test(haystack)) continue
+    // Название дорожки идёт в подпись: у рипов с двумя дорожками одного языка
+    // это единственное, чем «Дубляж» отличается от «Войсовер» в меню.
+    return { code: lang.code, label: title ? `${lang.label} — ${title}` : lang.label }
+  }
 
   if (raw && raw !== 'und') {
-    return { code: raw, label: tags.title || raw.toUpperCase() }
+    return { code: raw, label: title || raw.toUpperCase() }
   }
 
   return {
     code: `${kind}-${ordinal + 1}`,
-    label: tags.title || `${kind === 'audio' ? 'Audio' : 'Subtitles'} ${ordinal + 1}`
+    label: title || `${kind === 'audio' ? 'Audio' : 'Subtitles'} ${ordinal + 1}`
   }
+}
+
+// Коды дорожек обязаны быть уникальными: chooseTrack ищет дорожку по коду,
+// и при двух русских дорожках (дубляж + войсовер — обычное дело для рипов)
+// вторая была бы недостижима. Первая дорожка сохраняет чистый код, чтобы
+// сохранённое у клиента предпочтение ('rus') продолжало работать.
+function disambiguateTracks(tracks) {
+  const usedCodes = new Set()
+  const usedLabels = new Set()
+  for (const track of tracks) {
+    let code = track.code
+    let codeSeq = 1
+    while (usedCodes.has(code)) code = `${track.code}-${++codeSeq}`
+    usedCodes.add(code)
+    track.code = code
+
+    let label = track.label
+    let labelSeq = 1
+    while (usedLabels.has(label)) label = `${track.label} ${++labelSeq}`
+    usedLabels.add(label)
+    track.label = label
+  }
+  return tracks
 }
 
 function rawUrl(index) {
   return `http://127.0.0.1:${PORT}/raw/${index}`
 }
 
-function runCapture(command, args) {
+function runCapture(command, args, timeoutMs = 0) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
     const stdout = []
     const stderr = []
+    let timedOut = false
+
+    // Без таймера запрос может не завершиться никогда: ffprobe читает файл
+    // через /raw, то есть через торрент, и на раздаче без пиров просто висит.
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true
+          try { child.kill('SIGKILL') } catch {}
+        }, timeoutMs)
+      : null
+    if (timer && timer.unref) timer.unref()
+
     child.stdout.on('data', chunk => stdout.push(chunk))
     child.stderr.on('data', chunk => stderr.push(chunk))
-    child.on('error', reject)
+    child.on('error', err => {
+      if (timer) clearTimeout(timer)
+      reject(err)
+    })
     child.on('close', code => {
+      if (timer) clearTimeout(timer)
       const out = Buffer.concat(stdout).toString('utf8')
       const err = Buffer.concat(stderr).toString('utf8')
-      if (code === 0) resolve(out)
+      if (timedOut) reject(new Error(`${command} timed out after ${Math.round(timeoutMs / 1000)}s`))
+      else if (code === 0) resolve(out)
       else reject(new Error(`${command} exited with ${code}: ${err}`))
     })
   })
 }
 
-async function probeFile(index) {
-  index = Number(index)
-  if (probeCache.has(index)) return probeCache.get(index)
+// Один ffprobe на файл: телевизор и веб-клиент легко просят один индекс
+// одновременно (плюс пинг /api/probe/next перед концом эпизода), а каждый
+// лишний ffprobe — это отдельное чтение торрента.
+function probeFile(index) {
+  if (probeCache.has(index)) return Promise.resolve(probeCache.get(index))
+  const pending = probeInflight.get(index)
+  if (pending) return pending
+  const task = runProbe(index).finally(() => probeInflight.delete(index))
+  probeInflight.set(index, task)
+  return task
+}
+
+async function runProbe(index) {
   const file = getFile(index)
   if (!file) throw new Error('File not found')
 
@@ -124,7 +201,7 @@ async function probeFile(index) {
     '-show_format',
     '-of', 'json',
     rawUrl(index)
-  ])
+  ], PROBE_TIMEOUT_MS)
 
   const data = JSON.parse(output)
   const streams = data.streams || []
@@ -132,7 +209,7 @@ async function probeFile(index) {
   const subtitleRaw = streams.filter(s => s.codec_type === 'subtitle')
   const video = streams.find(s => s.codec_type === 'video') || null
 
-  const audio = audioRaw.map((s, i) => {
+  const audio = disambiguateTracks(audioRaw.map((s, i) => {
     const lang = normalizeLanguage(s, i, 'audio')
     return {
       index: s.index,
@@ -140,11 +217,16 @@ async function probeFile(index) {
       code: lang.code,
       label: lang.label,
       codec: s.codec_name || '',
+      // profile/channels/sampleRate нужны, чтобы решить, можно ли отдать
+      // дорожку как есть вместо перекодирования (см. canCopyAudio).
+      profile: s.profile || '',
+      channels: Number(s.channels) || 0,
+      sampleRate: Number(s.sample_rate) || 0,
       default: Boolean(s.disposition && s.disposition.default)
     }
-  })
+  }))
 
-  const subtitles = subtitleRaw.map((s, i) => {
+  const subtitles = disambiguateTracks(subtitleRaw.map((s, i) => {
     const lang = normalizeLanguage(s, i, 'sub')
     return {
       index: s.index,
@@ -154,8 +236,9 @@ async function probeFile(index) {
       codec: s.codec_name || '',
       default: Boolean(s.disposition && s.disposition.default)
     }
-  })
+  }))
 
+  const list = videoFiles()
   const duration = Number(data.format && data.format.duration) || 0
   const result = {
     index,
@@ -166,16 +249,68 @@ async function probeFile(index) {
       codec: video.codec_name || '',
       width: video.width || 0,
       height: video.height || 0,
-      pixFmt: video.pix_fmt || ''
+      pixFmt: video.pix_fmt || '',
+      profile: video.profile || '',
+      level: Number(video.level) || 0,
+      fieldOrder: video.field_order || ''
     } : null,
     audio,
     subtitles,
-    next: nextVideoIndex(index),
-    prev: prevVideoIndex(index)
+    next: nextVideoIndex(index, list),
+    prev: prevVideoIndex(index, list)
   }
 
   probeCache.set(index, result)
   return result
+}
+
+// Ремукс без перекодирования ловит форматы, которых декодер 2015 года не
+// понимает, поэтому whitelist узкий: ровно то, во что мы иначе перекодировали бы
+// сами. Всё, что вне списка (10 бит, 4:2:2, 4K, level 5+, чересстрочное),
+// по-прежнему идёт через libx264. Аварийный выключатель — HLS_ALLOW_COPY=0.
+const H264_SAFE_PROFILES = new Set(['constrained baseline', 'baseline', 'main', 'high'])
+
+function canCopyVideo(video, start) {
+  if (!ALLOW_COPY || !video) return false
+  // Output-side seek режет поток не по ключевому кадру, а вставить свои
+  // ключевые кадры в копируемый поток нельзя — при перемотке только перекодирование.
+  if (start > 0.05) return false
+  if (video.codec !== 'h264' || video.pixFmt !== 'yuv420p') return false
+  if (!H264_SAFE_PROFILES.has(String(video.profile).toLowerCase())) return false
+  if (!video.level || video.level > 41) return false
+  if (video.width > 1920 || video.height > 1088) return false
+  if (video.fieldOrder && video.fieldOrder !== 'progressive') return false
+  return true
+}
+
+function canCopyAudio(track, start) {
+  if (!ALLOW_COPY || !track) return false
+  if (start > 0.05) return false
+  if (track.codec !== 'aac' || String(track.profile).toUpperCase() !== 'LC') return false
+  if (!track.channels || track.channels > 2) return false
+  return track.sampleRate === 44100 || track.sampleRate === 48000
+}
+
+function videoArgs(copy) {
+  if (copy) return ['-c:v', 'copy']
+  return [
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-crf', '20',
+    '-pix_fmt', 'yuv420p',
+    '-profile:v', 'high',
+    '-level:v', '4.0',
+    '-sc_threshold', '0',
+    // Ключевой кадр раз в 4 с — ровно под -hls_time 4, чтобы сегменты резались
+    // одинаковыми. В режиме copy этого рычага нет: ffmpeg режет по тем ключевым
+    // кадрам, которые уже есть в файле.
+    '-force_key_frames', 'expr:gte(t,n_forced*4)'
+  ]
+}
+
+function audioArgs(copy) {
+  if (copy) return ['-c:a', 'copy']
+  return ['-c:a', 'aac', '-b:a', '160k', '-ac', '2', '-ar', '48000']
 }
 
 function chooseTrack(tracks, preference) {
@@ -187,39 +322,79 @@ function chooseTrack(tracks, preference) {
   return tracks.find(t => t.default) || tracks[0]
 }
 
-function escapeFilterUrl(url) {
-  // ffmpeg filter syntax needs ':' escaped and the URL quoted.
-  return `'${url.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'")}'`
-}
-
 function safeRm(dir) {
   try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
 }
 
+// Готовность сеанса считается только по числу готовых сегментов на диске,
+// и только вверх: preparing → buffering (есть первый) → ready (есть два)
+// → finished (ffmpeg вышел сам). Причина остановки живёт отдельно, в stopReason,
+// иначе фаза и причина затирают друг друга.
+function advancePhase(session, segments) {
+  if (session.phase === 'finished') return
+  if (segments >= 2) session.phase = 'ready'
+  else if (segments >= 1) session.phase = 'buffering'
+}
+
+// Наружу фаза, причина остановки и ошибка сводятся в одно поле state:
+// ошибка важнее остановки, остановка важнее фазы.
+function sessionState(session) {
+  if (session.error) return 'error'
+  return session.stopReason || session.phase
+}
+
+// Сегменты считаются инкрементально: ffmpeg нумерует их по порядку, а
+// `-hls_flags temp_file` делает появление файла атомарным, поэтому готовый
+// сегмент уже не изменится — достаточно посчитать его один раз. Полный обход
+// каталога на каждом опросе стоил бы O(числа сегментов) синхронных statSync
+// на event loop: у 45-минутного эпизода это ~700 файлов каждые 500 мс, на том
+// же цикле, который отдаёт сегменты телевизору и /raw ffmpeg'у.
+function pollSegments(session) {
+  if (session.nextSeq === null) {
+    // Первый проход: узнаём, с какого номера ffmpeg начал нумерацию, чтобы
+    // не завязываться на значение -start_number.
+    let lowest = null
+    try {
+      for (const name of fs.readdirSync(session.dir)) {
+        const m = /^seg(\d+)\.ts$/.exec(name)
+        if (!m) continue
+        const seq = Number(m[1])
+        if (lowest === null || seq < lowest) lowest = seq
+      }
+    } catch {}
+    if (lowest === null) return
+    session.nextSeq = lowest
+  }
+
+  for (;;) {
+    const name = `seg${String(session.nextSeq).padStart(5, '0')}.ts`
+    let stat
+    try { stat = fs.statSync(path.join(session.dir, name)) }
+    catch { break }
+    session.segments++
+    session.bytesOut += stat.size
+    session.nextSeq++
+    session.lastOutputAt = Date.now()
+  }
+}
+
+// Чистая функция: ничего не читает с диска, поэтому её можно звать на каждый
+// /api/status и /api/hls-status. Счётчики обновляет монитор сеанса.
 function sessionSnapshot(session) {
   if (!session) return null
-  let segments = 0
-  let bytesOut = 0
-  try {
-    const names = fs.readdirSync(session.dir)
-    for (const name of names) {
-      if (/^seg\d+\.ts$/.test(name)) {
-        segments++
-        try { bytesOut += fs.statSync(path.join(session.dir, name)).size } catch {}
-      }
-    }
-  } catch {}
   return {
     id: session.id,
     index: session.index,
     name: session.name,
     audio: session.audio,
     sub: session.sub,
+    videoMode: session.videoMode,
+    audioMode: session.audioMode,
     start: session.start,
-    state: session.state,
+    state: sessionState(session),
     startedAt: session.startedAt,
-    segments,
-    bytesOut,
+    segments: session.segments,
+    bytesOut: session.bytesOut,
     lastOutputAt: session.lastOutputAt,
     ffmpegPid: session.ffmpegPid,
     exitCode: session.exitCode,
@@ -236,13 +411,25 @@ function sessionSnapshot(session) {
 
 function stopHlsSession(session, reason = 'stopped') {
   if (!session) return
-  if (session.state !== 'error' && session.state !== 'finished') session.state = reason
+  if (!session.stopReason) session.stopReason = reason
   if (session.monitor) {
     clearInterval(session.monitor)
     session.monitor = null
   }
-  if (session.ff && !session.ff.killed) {
+  if (session.ff && !session.exited) {
     try { session.ff.kill('SIGTERM') } catch {}
+    // ffmpeg, заблокированный на чтении из подвисшего /raw, на SIGTERM может
+    // не отреагировать вовсе — и продолжит перекодировать и тянуть торрент
+    // уже после «остановки».
+    if (!session.killTimer) {
+      session.killTimer = setTimeout(() => {
+        session.killTimer = null
+        if (session.exited) return
+        console.warn(`ffmpeg [${session.index}] ignored SIGTERM, sending SIGKILL`)
+        try { session.ff.kill('SIGKILL') } catch {}
+      }, 5000)
+      if (session.killTimer.unref) session.killTimer.unref()
+    }
   }
 }
 
@@ -254,7 +441,13 @@ function scheduleHlsCleanup(session, delayMs = 2 * 60 * 1000) {
     // Never delete the HLS files of the session the TV is currently using.
     // ffmpeg can finish transcoding a whole episode much faster than realtime;
     // the player may still need those already-generated segments for many minutes.
-    if (activeHlsSession === session) return
+    // Живой ffmpeg тоже держит каталог: удалить его под процессом — получить
+    // поток ошибок записи вместо чистого выхода. В обоих случаях не выходим
+    // молча, а перевзводим таймер, иначе каталог не удалится уже никогда.
+    if (activeHlsSession === session || !session.exited) {
+      scheduleHlsCleanup(session, 30 * 1000)
+      return
+    }
 
     hlsSessions.delete(session.id)
     safeRm(session.dir)
@@ -272,14 +465,19 @@ async function startHlsSession(index, url) {
   const audio = chooseTrack(meta.audio, audioPref)
   const subtitle = subPref === 'off' ? null : chooseTrack(meta.subtitles, subPref)
 
+  const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const dir = path.join(os.tmpdir(), `tms-hls-${id}`)
+
+  // Каталог создаётся до остановки предыдущего сеанса: если mkdir упадёт,
+  // работающее воспроизведение не должно оказаться убитым зря.
+  fs.mkdirSync(dir, { recursive: true })
+
   if (activeHlsSession) {
     stopHlsSession(activeHlsSession, 'replaced')
     scheduleHlsCleanup(activeHlsSession, 2 * 60 * 1000)
+    activeHlsSession = null
   }
 
-  const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-  const dir = path.join(os.tmpdir(), `tms-hls-${id}`)
-  fs.mkdirSync(dir, { recursive: true })
   const playlistPath = path.join(dir, 'index.m3u8')
   const segmentPattern = path.join(dir, 'seg%05d.ts')
 
@@ -303,22 +501,14 @@ async function startHlsSession(index, url) {
   // as an out-of-band WebVTT HLS rendition.
   if (subtitle) args.push('-map', `0:${subtitle.index}`)
 
-  // Always normalize the stream for the 2015 Samsung decoder/browser:
-  // H.264 + yuv420p + AAC in MPEG-TS HLS segments.
-  args.push(
-    '-c:v', 'libx264',
-    '-preset', 'veryfast',
-    '-crf', '20',
-    '-pix_fmt', 'yuv420p',
-    '-profile:v', 'high',
-    '-level:v', '4.0',
-    '-sc_threshold', '0',
-    '-force_key_frames', 'expr:gte(t,n_forced*4)'
-  )
+  // По умолчанию поток нормализуется под декодер 2015 года: H.264 + yuv420p
+  // + AAC stereo в MPEG-TS. Если исходник уже ровно в этом виде, перекодировать
+  // нечего — тогда дорожка отдаётся как есть (см. canCopyVideo/canCopyAudio).
+  const copyVideo = canCopyVideo(meta.video, start)
+  const copyAudio = Boolean(audio) && canCopyAudio(audio, start)
 
-  if (audio) {
-    args.push('-c:a', 'aac', '-b:a', '160k', '-ac', '2', '-ar', '48000')
-  }
+  args.push(...videoArgs(copyVideo))
+  if (audio) args.push(...audioArgs(copyAudio))
 
   if (subtitle) args.push('-c:s', 'webvtt')
   else args.push('-sn')
@@ -333,20 +523,26 @@ async function startHlsSession(index, url) {
     '-hls_segment_filename', segmentPattern
   )
 
-  // With subtitles, generate a small HLS master playlist that points at the
-  // MPEG-TS A/V stream plus an out-of-band WebVTT subtitle rendition. Samsung
-  // Smart TV recommends WebVTT for HLS, and this allows the first media segments
-  // to be generated immediately instead of pre-reading the full MP4.
+  // -var_stream_map нужен ровно для одного побочного эффекта: он заставляет
+  // ffmpeg вынести субтитры в отдельную дорожку WebVTT (index_vtt.m3u8), которую
+  // приложение забирает само. Появляющийся при этом master.m3u8 не читает никто:
+  // Tizen 2.3 не разбирает #EXT-X-MEDIA, а браузерный клиент открывает
+  // index.m3u8 напрямую. Имя A/V-плейлиста от этого не меняется.
   if (subtitle) {
+    // Суффикс уникальности ('eng-2') — наша внутренняя добавка, в тег языка
+    // должен уйти чистый код.
+    const subLanguage = subtitle.code.replace(/-\d+$/, '')
     args.push(
-      '-var_stream_map', `v:0${audio ? ',a:0' : ''},s:0,sgroup:subs,language:${subtitle.code},default:yes`,
+      '-var_stream_map', `v:0${audio ? ',a:0' : ''},s:0,sgroup:subs,language:${subLanguage},default:yes`,
       '-master_pl_name', 'master.m3u8'
     )
   }
 
   args.push(playlistPath)
 
-  console.log(`HLS [${index}] audio=${audio ? audio.code : 'none'} sub=${subtitle ? subtitle.code : 'off'} start=${start.toFixed(1)} mode=${subtitle ? 'webvtt' : 'no-subs'}`)
+  const videoMode = copyVideo ? 'copy' : 'transcode'
+  const audioMode = audio ? (copyAudio ? 'copy' : 'transcode') : 'none'
+  console.log(`HLS [${index}] audio=${audio ? audio.code : 'none'} sub=${subtitle ? subtitle.code : 'off'} start=${start.toFixed(1)} video=${videoMode} audio-mode=${audioMode} mode=${subtitle ? 'webvtt' : 'no-subs'}`)
 
   const session = {
     id,
@@ -355,25 +551,29 @@ async function startHlsSession(index, url) {
     name: meta.name,
     audio: audio ? audio.code : 'none',
     sub: subtitle ? subtitle.code : 'off',
+    videoMode,
+    audioMode,
     start,
-    playlistFile: 'index.m3u8',
     downloadedAtStart: torrent ? torrent.downloaded : 0,
-    state: 'preparing',
+    phase: 'preparing',
+    stopReason: null,
     startedAt: Date.now(),
     lastOutputAt: null,
     ffmpegPid: null,
     exitCode: null,
     error: null,
     ff: null,
+    exited: false,
     monitor: null,
     cleanupTimer: null,
-    lastSegmentCount: 0,
-    lastBytesOut: 0
+    killTimer: null,
+    segments: 0,
+    bytesOut: 0,
+    nextSeq: null
   }
 
   hlsSessions.set(id, session)
   activeHlsSession = session
-  playbackStatus = sessionSnapshot(session)
 
   const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] })
   session.ff = ff
@@ -386,42 +586,42 @@ async function startHlsSession(index, url) {
   })
 
   session.monitor = setInterval(() => {
-    const snap = sessionSnapshot(session)
-    if (snap.segments > session.lastSegmentCount || snap.bytesOut > session.lastBytesOut) {
-      session.lastOutputAt = Date.now()
-      session.lastSegmentCount = snap.segments
-      session.lastBytesOut = snap.bytesOut
-      if (snap.segments >= 2 && session.state === 'preparing') session.state = 'ready'
-      else if (snap.segments >= 1 && session.state === 'preparing') session.state = 'buffering'
-    }
-    if (activeHlsSession === session) playbackStatus = sessionSnapshot(session)
+    pollSegments(session)
+    advancePhase(session, session.segments)
   }, 500)
   if (session.monitor.unref) session.monitor.unref()
 
   ff.on('error', err => {
-    session.state = 'error'
+    // Процесса нет — снимаем флаг, иначе чистка каталога будет ждать его вечно.
+    session.exited = true
     session.error = err.message
-    if (activeHlsSession === session) playbackStatus = sessionSnapshot(session)
     console.error('ffmpeg spawn error:', err)
   })
 
   ff.on('close', code => {
     session.exitCode = code
+    session.exited = true
+    if (session.killTimer) {
+      clearTimeout(session.killTimer)
+      session.killTimer = null
+    }
     if (session.monitor) {
       clearInterval(session.monitor)
       session.monitor = null
     }
-    const wasStopped = ['replaced', 'stopped'].includes(session.state)
+    // 255 и 143 — как ffmpeg уходит по сигналу, это не ошибка перекодирования.
+    const wasStopped = Boolean(session.stopReason)
     if (!wasStopped && code && code !== 255 && code !== 143) {
-      session.state = 'error'
       session.error = (stderr || `ffmpeg exited ${code}`).slice(-3000)
       console.error(`ffmpeg exited ${code}:\n${stderr}`)
-    } else if (!wasStopped && session.state !== 'error') {
-      session.state = 'finished'
+    } else if (!wasStopped && !session.error) {
+      session.phase = 'finished'
     }
+    // Монитор уже остановлен — досчитываем последние сегменты сами.
+    pollSegments(session)
+    advancePhase(session, session.segments)
     session.lastOutputAt = Date.now()
     if (activeHlsSession === session) {
-      playbackStatus = sessionSnapshot(session)
       console.log(`HLS [${session.index}] generation finished; keeping active session ${session.id} until playback stops or is replaced`)
     } else {
       scheduleHlsCleanup(session)
@@ -439,24 +639,27 @@ function serveHlsFile(res, sessionId, fileName) {
   if (!/^[A-Za-z0-9._-]+\.(m3u8|ts|vtt)$/.test(fileName)) return sendText(res, 400, 'Bad HLS path')
 
   const full = path.join(session.dir, fileName)
-  if (!fs.existsSync(full)) return sendText(res, 404, 'Not ready')
-
-  let body
-  try { body = fs.readFileSync(full) }
-  catch (err) { return sendText(res, 500, err.message) }
-
   const type = fileName.endsWith('.m3u8')
     ? 'application/vnd.apple.mpegurl'
     : fileName.endsWith('.vtt')
       ? 'text/vtt; charset=utf-8'
       : 'video/mp2t'
-  res.writeHead(200, {
-    'Content-Type': type,
-    'Content-Length': body.length,
-    'Cache-Control': fileName.endsWith('.m3u8') ? 'no-store' : 'public, max-age=3600',
-    'Access-Control-Allow-Origin': '*'
+
+  // Стримом, а не readFileSync: сегмент весит несколько мегабайт, и
+  // синхронное чтение на каждый запрос вставало бы поперёк event loop.
+  fs.stat(full, (err, stat) => {
+    if (err || !stat.isFile()) return sendText(res, 404, 'Not ready')
+    res.writeHead(200, {
+      'Content-Type': type,
+      'Content-Length': stat.size,
+      'Cache-Control': fileName.endsWith('.m3u8') ? 'no-store' : 'public, max-age=3600',
+      'Access-Control-Allow-Origin': '*'
+    })
+    const stream = fs.createReadStream(full)
+    res.on('close', () => stream.destroy())
+    stream.on('error', streamErr => res.destroy(streamErr))
+    stream.pipe(res)
   })
-  res.end(body)
 }
 
 function serveRaw(req, res, index) {
@@ -465,16 +668,6 @@ function serveRaw(req, res, index) {
 
   const size = file.length
   const range = req.headers.range
-
-  if (req.method === 'HEAD' && !range) {
-    res.writeHead(200, {
-      'Content-Type': file.type || 'application/octet-stream',
-      'Content-Length': size,
-      'Accept-Ranges': 'bytes',
-      'Cache-Control': 'no-store'
-    })
-    return res.end()
-  }
 
   if (!range) {
     res.writeHead(200, {
@@ -530,7 +723,6 @@ function serveRaw(req, res, index) {
 }
 
 function prebuffer(index, bytes = 8 * 1024 * 1024) {
-  index = Number(index)
   if (prebuffering.has(index)) return
   const file = getFile(index)
   if (!file) return
@@ -540,12 +732,13 @@ function prebuffer(index, bytes = 8 * 1024 * 1024) {
   stream.on('data', () => {})
   stream.on('error', err => {
     console.warn(`Prebuffer [${index}] failed:`, err.message)
-    prebuffering.delete(index)
   })
   stream.on('end', () => {
     console.log(`Prebuffered [${index}] ${Math.round((end + 1) / 1024 / 1024)} MB`)
-    prebuffering.delete(index)
   })
+  // Флаг снимается на 'close': он приходит и после 'end', и после 'error',
+  // и после уничтожения потока — иначе индекс остался бы залипшим навсегда.
+  stream.on('close', () => prebuffering.delete(index))
 }
 
 function appHtml() {
@@ -819,7 +1012,8 @@ function appHtml() {
         var extra = pb.bytesOut ? ' · ' + fmtBytes(pb.bytesOut) + ' produced · ' + (pb.segments || 0) + ' HLS segments' : '';
         if (typeof pb.downloadedSinceStart === 'number') extra += ' · ' + fmtBytes(pb.downloadedSinceStart) + ' downloaded for this playback';
         if (pb.lastOutputAt) extra += ' · last output ' + Math.max(0, Math.floor((Date.now() - pb.lastOutputAt) / 1000)) + 's ago';
-        playerStatus.textContent = 'Player: ' + pb.state + ' · episode [' + pb.index + '] · audio=' + pb.audio + ' · subtitles=' + pb.sub + ' · ' + age + 's' + extra;
+        playerStatus.textContent = 'Player: ' + pb.state + ' · episode [' + pb.index + '] · audio=' + pb.audio + ' · subtitles=' + pb.sub +
+          ' · video ' + (pb.videoMode || '?') + '/audio ' + (pb.audioMode || '?') + ' · ' + age + 's' + extra;
         playerStatus.className = 'statusline small ' + (pb.state === 'error' ? 'status-bad' : ((pb.state === 'ready' || pb.state === 'finished') ? 'status-ok' : 'status-warn'));
       }
       refreshHumanStatus();
@@ -884,8 +1078,7 @@ function appHtml() {
     }
   }
 
-  function waitForHls(sessionId, playlist, automatic, attempt) {
-    attempt = attempt || 0;
+  function waitForHls(sessionId, playlist, automatic) {
     xhrJson('/api/hls-status/' + encodeURIComponent(sessionId) + '?_=' + Date.now(), function (err, s) {
       if (err) {
         status.textContent = 'HLS status failed: ' + err.message;
@@ -899,6 +1092,10 @@ function appHtml() {
         refreshHumanStatus();
         return;
       }
+      // Сеанс остановлен или заменён более новым /api/start: его сегменты ещё
+      // лежат на диске, но открывать их нельзя. Молча выходим — экраном
+      // распоряжается тот опрос, который заменил этот.
+      if (s.state === 'stopped' || s.state === 'replaced') return;
       if (s.segments >= 2 || s.state === 'finished') {
         status.textContent = 'Opening Samsung-compatible HLS stream…';
         browserState = 'loading';
@@ -914,7 +1111,7 @@ function appHtml() {
       status.textContent = 'Preparing HLS: ' + (s.segments || 0) + '/2 startup segments…';
       browserState = 'waiting';
       refreshHumanStatus();
-      setTimeout(function () { waitForHls(sessionId, playlist, automatic, attempt + 1); }, 700);
+      setTimeout(function () { waitForHls(sessionId, playlist, automatic); }, 700);
     });
   }
 
@@ -941,7 +1138,7 @@ function appHtml() {
         refreshHumanStatus();
         return;
       }
-      waitForHls(data.id, data.playlist, automatic, 0);
+      waitForHls(data.id, data.playlist, automatic);
     });
   }
 
@@ -1095,7 +1292,9 @@ const server = http.createServer(async (req, res) => {
         downloadSpeed: torrent.downloadSpeed,
         downloaded: torrent.downloaded,
         progress: torrent.progress,
-        playback: playbackStatus
+        // Считается на месте: снапшот дешёвый, а отдельное зеркало оставалось
+        // висеть после остановки и показывало клиенту мёртвый сеанс.
+        playback: sessionSnapshot(activeHlsSession)
       })
     }
 
@@ -1103,8 +1302,6 @@ const server = http.createServer(async (req, res) => {
       if (activeHlsSession) {
         const session = activeHlsSession
         stopHlsSession(session, 'stopped')
-        session.lastOutputAt = Date.now()
-        playbackStatus = sessionSnapshot(session)
         activeHlsSession = null
         scheduleHlsCleanup(session, 2 * 60 * 1000)
         return sendJson(res, 200, { ok: true, stopped: session.id })
@@ -1115,13 +1312,20 @@ const server = http.createServer(async (req, res) => {
     let m = url.pathname.match(/^\/api\/probe\/(\d+)$/)
     if (m) {
       if (!torrent) return sendJson(res, 503, { error: 'Torrent metadata is loading' })
-      try { return sendJson(res, 200, await probeFile(Number(m[1]))) }
+      const index = Number(m[1])
+      if (!getFile(index)) return sendJson(res, 404, { error: 'File not found' })
+      // Текст ошибки здесь функциональный (таймаут ffprobe, битый файл) —
+      // оба клиента показывают его на экране.
+      try { return sendJson(res, 200, await probeFile(index)) }
       catch (err) { return sendJson(res, 500, { error: err.message }) }
     }
 
     m = url.pathname.match(/^\/api\/prebuffer\/(\d+)$/)
     if (m) {
-      prebuffer(Number(m[1]))
+      if (!torrent) return sendJson(res, 503, { error: 'Torrent metadata is loading' })
+      const index = Number(m[1])
+      if (!getFile(index)) return sendJson(res, 404, { error: 'File not found' })
+      prebuffer(index)
       return sendJson(res, 200, { ok: true })
     }
 
@@ -1131,7 +1335,9 @@ const server = http.createServer(async (req, res) => {
     m = url.pathname.match(/^\/api\/start\/(\d+)$/)
     if (m) {
       if (!torrent) return sendJson(res, 503, { error: 'Torrent metadata is loading' })
-      try { return sendJson(res, 200, await startHlsSession(Number(m[1]), url)) }
+      const index = Number(m[1])
+      if (!getFile(index)) return sendJson(res, 404, { error: 'File not found' })
+      try { return sendJson(res, 200, await startHlsSession(index, url)) }
       catch (err) { return sendJson(res, 500, { error: err.message }) }
     }
 
@@ -1148,7 +1354,9 @@ const server = http.createServer(async (req, res) => {
     return sendText(res, 404, 'Not found')
   } catch (err) {
     console.error(err)
-    if (!res.headersSent) sendText(res, 500, err.message)
+    // Наружу — только общая формулировка: в err.message тут попадают пути
+    // на диске и хвост stderr ffmpeg.
+    if (!res.headersSent) sendText(res, 500, 'Internal server error')
     else res.destroy(err)
   }
 })
@@ -1158,7 +1366,7 @@ server.listen(PORT, '0.0.0.0', () => {
 })
 
 client.add(torrentFile, {
-  path: '/tmp/webtorrent',
+  path: TORRENT_STORE,
   deselect: true,
   destroyStoreOnDestroy: true
 }, t => {
@@ -1169,10 +1377,34 @@ client.add(torrentFile, {
   console.log(`Video files: ${videoFiles().length}`)
 })
 
+let shuttingDown = false
+
 async function shutdown() {
+  if (shuttingDown) return
+  shuttingDown = true
   console.log('\nStopping...')
-  for (const session of hlsSessions.values()) stopHlsSession(session)
-  server.close()
+
+  // Процесс всё равно уходит — ffmpeg добиваем сразу, ждать вежливого выхода
+  // незачем. Каталоги сеансов удаляем здесь же: иначе `tms-hls-*` остаётся
+  // в tmpdir после каждого запуска, с сегментами целого эпизода внутри.
+  for (const session of hlsSessions.values()) {
+    if (session.monitor) clearInterval(session.monitor)
+    if (session.cleanupTimer) clearTimeout(session.cleanupTimer)
+    if (session.killTimer) clearTimeout(session.killTimer)
+    if (session.ff && !session.exited) {
+      try { session.ff.kill('SIGKILL') } catch {}
+    }
+    safeRm(session.dir)
+  }
+  hlsSessions.clear()
+  activeHlsSession = null
+
+  // Открытое чтение /raw или сокеты webtorrent могут не отпустить процесс —
+  // уходим по таймеру, а не висим.
+  const watchdog = setTimeout(() => process.exit(0), 5000)
+  if (watchdog.unref) watchdog.unref()
+
+  await new Promise(resolve => server.close(resolve))
   try { await client.destroy() } catch {}
   process.exit(0)
 }

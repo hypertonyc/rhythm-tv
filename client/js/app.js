@@ -842,6 +842,10 @@
                 showHud('HLS generation failed');
                 return;
             }
+            /* Сеанс остановлен или заменён более новым /api/start: сегменты ещё
+             * лежат на сервере, но открывать их нельзя. Выходим молча, не трогая
+             * restarting и HUD — ими распоряжается опрос, заменивший этот. */
+            if (s.state === 'stopped' || s.state === 'replaced') return;
             if ((s.segments || 0) >= 2 || s.state === 'finished') {
                 openPlaylist(serverBase + playlist + '?_=' + new Date().getTime());
                 return;
