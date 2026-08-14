@@ -141,6 +141,28 @@ scripts/    tizen-build-install.sh — сборка, подпись и уста�
 в `tizen_web_project.yaml` он игнорирует. На телевизор это не влияет: id и package
 приложения берутся из `config.xml` (`IDwM3cpKkk.torrentmediaclient`).
 
+### Обёртка над sdb
+
+**`sdb` в тулчейне — не оригинал, а наш bash-скрипт;** оригинальный бинарник лежит
+рядом как `sdb.real`. Копия обёртки — [scripts/sdb-wrapper.sh](scripts/sdb-wrapper.sh),
+она же и ставится: `./scripts/sdb-wrapper.sh --install` (путь берёт из `SDB` в `.env`,
+повторный запуск безопасен). Восстанавливать приходится потому, что тулчейн живёт вне
+репозитория (`~/.tizen-extension-platform/server/sdktools/`) и переустановка SDK
+затирает обёртку оригинальным `sdb`.
+
+Обёртка делает три вещи:
+
+- пишет все вызовы sdb в `/tmp/tizen-vscode-sdb.log` — единственный способ увидеть,
+  что именно делает с телевизором расширение VS Code;
+- `vd_applist` → `applist`;
+- переписывает путь `.wgt` из корня в `/opt/usr/apps/tmp`: на сетах 2015 года корень
+  read-only, `tz install` кладёт пакет в `/`, push падает с «failed to close»,
+  и `vd_appinstall` потом ничего не находит.
+
+Последние два фикса нужны только установке через `tz` (сборка из UI расширения).
+`scripts/tizen-build-install.sh` ставит Java-шным `tizen`, который сам пишет
+в `/opt/usr/apps/tmp`, — на этом пути фиксы не срабатывают, но логирование работает.
+
 Сервер: `docker build` + `docker run` из `server/` (см. README) либо
 `node server.mjs file.torrent` при локально установленных Node и ffmpeg.
 
