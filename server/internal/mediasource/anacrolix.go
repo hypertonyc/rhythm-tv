@@ -173,6 +173,10 @@ func (c *Client) Add(torrentPath string) (*Torrent, error) {
 
 		tr.ready.Store(true)
 		log.Printf("torrent ready: %q, %d files", t.Name(), len(t.Files()))
+
+		// И дальше — на ходу: файл теряет данные во время просмотра, а не
+		// при старте, так что разовой проверки выше мало. См. phantom.go.
+		go watchPhantomFiles(ctx, t, c.dataDir)
 	}()
 
 	tr.sampler.Add(1)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"path/filepath"
+	"time"
 
 	"github.com/anacrolix/torrent"
 )
@@ -30,6 +31,15 @@ const (
 	// к размеру у неё скачет само по себе.
 	phantomMinLength = 16 << 20
 
+	// phantomInterval — как часто проверка повторяется на ходу.
+	//
+	// Проверять только при старте недостаточно: файл теряет данные именно
+	// во время просмотра. S08E05 занимала 177 МБ в 12:30, была просмотрена
+	// около 12:52 и к 12:57 занимала 1.1 МБ. Со стартовой проверкой такая
+	// серия оставалась бы битой до следующей выкатки, а выяснилось бы это,
+	// когда её захотят посмотреть снова. Стоит проверка одного stat на файл.
+	phantomInterval = 5 * time.Minute
+
 	// phantomMaxShare — доля размера, ниже которой занятое место считается
 	// невозможным для честно скачанного файла. Половина взята с большим
 	// запасом: у настоящей аварии было 0–1%, а у целых файлов — 95%+.
@@ -49,6 +59,24 @@ func isPhantom(length, allocated int64) bool {
 		return false
 	}
 	return float64(allocated) < float64(length)*phantomMaxShare
+}
+
+// watchPhantomFiles повторяет проверку, пока жив торрент. Выходит по отмене
+// контекста — он закрывается вместе с торрентом, так что снятый торрент
+// горутину за собой не оставляет.
+func watchPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string) {
+	ticker := time.NewTicker(phantomInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if healed := healPhantomFiles(ctx, t, dataDir); healed > 0 {
+				log.Printf("phantom files: вылечено %d на ходу — недостающее докачается по требованию", healed)
+			}
+		}
+	}
 }
 
 // healPhantomFiles снимает ложные отметки готовности, перепроверяя хэши
