@@ -23,7 +23,7 @@ NODE="http://127.0.0.1:${NODE_PORT}"
 GO="http://127.0.0.1:${GO_PORT}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 
 [ -f "$TORRENT" ] || { echo "нет файла $TORRENT" >&2; exit 1; }
 [ -d server/legacy ] || { echo "server/legacy удалён — сверять больше не с чем" >&2; exit 1; }
@@ -62,7 +62,7 @@ done
 # они про соединение, а не про контракт.
 norm_headers() {
   grep -iE '^(HTTP/|content-type|content-length|content-range|cache-control|accept-ranges|access-control)' \
-    | tr -d '\r' | sed 's/^HTTP\/1\.1 /STATUS /' | tr 'A-Z' 'a-z' | sort
+    | tr -d '\r' | sed 's/^HTTP\/1\.1 /STATUS /' | tr '[:upper:]' '[:lower:]' | sort
 }
 
 shape_of() {

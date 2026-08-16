@@ -1,0 +1,135 @@
+# Выкатка образа на VPS.
+#
+# Вызывается автоматически из server.yml после успешной сборки main
+# и вручную — для отката на любой прошлый sha.
+#
+# Настоящий zero-downtime здесь недостижим и гнаться за ним не надо: всё
+# состояние сеанса лежит в процессе, сегменты — в томе под случайным id,
+# и новый контейнер отдаст 404 на старый id сеанса. Дефицитный ресурс тут
+# не аптайм, а «не оборвать человека на диване», и именно это закрывает
+# шаг «идёт ли воспроизведение» ниже.
+name: deploy
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Тег образа — sha коммита'
+        required: true
+        type: string
+      force:
+        description: 'Выкатывать, даже если идёт воспроизведение'
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'sha коммита. Пусто — последний коммит, тронувший server/'
+        required: false
+        type: string
+        default: ''
+      force:
+        description: 'Выкатывать, даже если идёт воспроизведение (обрвёт серию)'
+        type: boolean
+        default: false
+
+concurrency:
+  # Деплои становятся в очередь и НЕ отменяются: отмена между подменой .env
+  # и `up -d` оставила бы /srv/tms описывающим не тот образ, что запущен.
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # нужен git rev-list ниже
+
+      - name: определить тег
+        id: tag
+        run: |
+          set -euo pipefail
+          TAG='${{ inputs.image_tag }}'
+          if [ -z "$TAG" ]; then
+            # Сборка отфильтрована по путям, поэтому у HEAD может не быть
+            # своего образа. Существует образ того коммита, который последним
+            # мог его изменить. Список путей держать в согласии с server.yml.
+            TAG="$(git rev-list -1 HEAD -- server/ deploy/ .github/workflows/server.yml)"
+          fi
+          [[ "$TAG" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::некорректный тег '$TAG'"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: убедиться, что образ есть в GHCR
+        run: |
+          set -euo pipefail
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          IMG='ghcr.io/${{ github.repository }}/server:${{ steps.tag.outputs.tag }}'
+          docker buildx imagetools inspect "$IMG" >/dev/null \
+            || { echo "::error::$IMG нет в GHCR — прогоните сборку для этого коммита"; exit 1; }
+          echo "найден: $IMG"
+
+      - name: подготовить SSH
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' '${{ secrets.DEPLOY_SSH_KEY }}' > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Ключ хоста прибит гвоздями. StrictHostKeyChecking=no тут нельзя:
+          # этим ключом перезапускается прод.
+          printf '%s\n' '${{ secrets.DEPLOY_KNOWN_HOSTS }}' > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: не выкатывать, если смотрят
+        if: ${{ !inputs.force }}
+        run: |
+          set -euo pipefail
+          PLAYBACK="$(ssh -p '${{ secrets.DEPLOY_PORT }}' \
+            '${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}' playback)"
+          echo "воспроизведение: $PLAYBACK"
+          if [ "$PLAYBACK" != 'idle' ]; then
+            echo '::error::идёт сеанс — редеплой убьёт ffmpeg посреди серии.'
+            echo '::error::Образ уже в GHCR, ничего не потеряно. Перезапустите деплой позже'
+            echo '::error::или вручную с force=true.'
+            exit 1
+          fi
+
+      - name: выкатить
+        run: |
+          set -euo pipefail
+          # compose.yaml едет на stdin: scp под forced command невозможен,
+          # а stdin работает. Так конфиг остаётся в git и путешествует вместе
+          # с деплоем, а ключ по-прежнему не может выполнить ничего другого.
+          ssh -p '${{ secrets.DEPLOY_PORT }}' \
+            '${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}' \
+            'deploy ${{ steps.tag.outputs.tag }}' < deploy/compose.yaml
+
+      - name: дымовой тест
+        run: |
+          set -euo pipefail
+          # Бьём в 127.0.0.1 ИЗНУТРИ VPS, а не во внешний адрес с токеном.
+          # Это осознанно: так секретный префикс пути никогда не попадает
+          # ни в Actions, ни в его логи. Улучшать до внешней проверки нельзя.
+          ssh -p '${{ secrets.DEPLOY_PORT }}' \
+            '${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}' status
+
+      - name: итог
+        if: always()
+        run: |
+          {
+            echo "### Выкачено \`${{ steps.tag.outputs.tag }}\`"
+            echo
+            echo 'Откат:'
+            echo '```sh'
+            echo 'ssh -i ~/.ssh/tms-deploy tmsdeploy@<vps> rollback'
+            echo '# или'
+            echo 'gh workflow run deploy.yml -f image_tag=<прошлый-sha> -f force=true'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

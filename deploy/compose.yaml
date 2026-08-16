@@ -1,0 +1,84 @@
+# Прод-конфигурация для VPS.
+#
+# Приезжает по SSH на stdin при каждом деплое и ложится как /srv/tms/compose.yaml.
+# Все значения — из /srv/tms/.env, которого в git нет (шаблон — .env.example).
+name: tms
+
+services:
+  server:
+    image: ${SERVER_IMAGE:?SERVER_IMAGE обязателен}:${SERVER_TAG:?SERVER_TAG обязателен}
+    container_name: tms-server
+
+    # Единственный аргумент сервера — путь к .torrent ВНУТРИ контейнера.
+    # `:?` здесь не педантизм: без него получилось бы command: [""], сервер
+    # напечатал бы Usage и вышел с кодом 1 — прямо в перезапускающийся цикл.
+    command: ["${TORRENT_FILE:?TORRENT_FILE обязателен}"]
+
+    restart: unless-stopped
+
+    # shutdown() убивает ffmpeg и уходит по 5-секундному сторожевому таймеру,
+    # так что 15 с хватает с запасом и до SIGKILL дело не доходит.
+    stop_grace_period: 15s
+
+    ports:
+      # ТОЛЬКО loopback. Docker вписывает свои DNAT-правила в цепочку DOCKER,
+      # которая проходится ДО правил ufw, поэтому `ufw deny 8000` скорее всего
+      # ничего не закрывает. А своей авторизации у сервера нет вообще —
+      # снаружи его публикует reverse-proxy с токеном в пути.
+      - "127.0.0.1:${HOST_PORT:-8000}:8000"
+      # Порт для входящих пиров — этот наружу открыт намеренно.
+      - "${TORRENT_PORT:-42069}:${TORRENT_PORT:-42069}"
+      - "${TORRENT_PORT:-42069}:${TORRENT_PORT:-42069}/udp"
+
+    environment:
+      PORT: "8000"
+      TORRENT_PORT: "${TORRENT_PORT:-42069}"
+      # Оба рабочих каталога уводим с overlayfs контейнера на именованные тома.
+      TORRENT_STORE: /var/lib/tms/store
+      TMPDIR: /var/lib/tms/hls
+      HLS_ALLOW_COPY: "${HLS_ALLOW_COPY:-1}"
+      PROBE_TIMEOUT_MS: "${PROBE_TIMEOUT_MS:-25000}"
+
+    volumes:
+      - ${TORRENT_DIR:?TORRENT_DIR обязателен}:/data:ro # только .torrent, только чтение
+      - torrent-store:/var/lib/tms/store
+      - hls-scratch:/var/lib/tms/hls
+
+    # healthcheck не дублируется: он объявлен в самом образе
+    # (`server -healthcheck`, бьёт в /api/status).
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    deploy:
+      resources:
+        limits:
+          # Ниже ~2.0 realtime-транскод libx264 не тянет, а это весь продукт.
+          cpus: "${CPU_LIMIT:-3.0}"
+          memory: ${MEM_LIMIT:-2g}
+          # Здесь, а не отдельным pids_limit: compose сводит их в одно поле
+          # и падает, если заданы оба.
+          pids: 512
+
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  # Именованные тома, а не tmpfs, и это стоит объяснить.
+  #
+  # Сегменты 45-минутной серии — это 0.8-1.2 ГБ, а в режиме copy на
+  # высокобитрейтном исходнике до 3-6 ГБ, и скользящего окна нет: счётчик идёт
+  # вверх, старые .ts не удаляются до конца сеанса. tmpfs на 2 ГБ (а) съел бы
+  # RAM, которую лучше отдать под страничный кэш торрента, и (б) упал бы
+  # с ENOSPC ПОСРЕДИ СЕРИИ — ffmpeg умирает, сеанс уходит в error, зритель
+  # на 25-й минуте. Это строго хуже, чем «кончается диск», потому что
+  # гарантированно, а не условно.
+  #
+  # Хранилище торрента на томе тоже не случайно: запись идёт мимо overlayfs,
+  # данные переживают OOM и перезагрузку хоста, и есть чем сделать чистый
+  # старт — docker volume rm.
+  torrent-store:
+  hls-scratch:

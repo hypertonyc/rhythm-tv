@@ -62,8 +62,8 @@ args=("$@")
 
 # Compatibility fix for old Samsung TV
 for ((i=0; i<${#args[@]}; i++)); do
-    if [[ "${args[$i]}" == "vd_applist" ]]; then
-        args[$i]="applist"
+    if [[ "${args[i]}" == "vd_applist" ]]; then
+        args[i]="applist"
     fi
 done
 
@@ -73,12 +73,12 @@ done
 # Redirect any root-level .wgt path to the staging directory the platform expects.
 STAGE=/opt/usr/apps/tmp
 for ((i=0; i<${#args[@]}; i++)); do
-    if [[ "${args[$i]}" =~ ^/[^/]+\.wgt$ ]]; then
+    if [[ "${args[i]}" =~ ^/[^/]+\.wgt$ ]]; then
         # bare destination argument, e.g. "push <local> /app.wgt"
-        args[$i]="$STAGE${args[$i]}"
-    elif [[ "${args[$i]}" == *" /"*".wgt"* ]]; then
+        args[i]="$STAGE${args[$i]}"
+    elif [[ "${args[i]}" == *" /"*".wgt"* ]]; then
         # path inside one combined argument, e.g. "0 vd_appinstall <id> /app.wgt"
-        args[$i]="$(printf '%s' "${args[$i]}" | sed -E "s#(^| )/([^/ ]+\.wgt)( |\$)#\1${STAGE}/\2\3#g")"
+        args[i]="$(printf '%s' "${args[i]}" | sed -E "s#(^| )/([^/ ]+\.wgt)( |\$)#\1${STAGE}/\2\3#g")"
     fi
 done
 

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Единственное, что может выполнить CI-ключ.
+#
+# Ставится на VPS как /usr/local/bin/tms-deploy и прибивается к ключу через
+# command="..." в authorized_keys, поэтому ключ не может выполнить ничего,
+# кроме четырёх глаголов ниже. Порядок установки — в deploy/README.md.
+#
+# Глаголы: deploy <sha> | rollback | status | playback
+#
+# compose.yaml приезжает на stdin: scp под forced command невозможен,
+# а stdin работает. Так конфиг остаётся под контролем версий и путешествует
+# вместе с деплоем.
+set -euo pipefail
+umask 077
+cd /srv/tms
+
+read -r -a ARGV <<< "${SSH_ORIGINAL_COMMAND:-}"
+VERB="${ARGV[0]:-}"
+
+dc() { docker compose --project-name tms -f /srv/tms/compose.yaml --env-file /srv/tms/.env "$@"; }
+
+case "$VERB" in
+  deploy)
+    TAG="${ARGV[1]:-}"
+    [[ "$TAG" =~ ^[0-9a-f]{40}$ ]] || { echo 'ОШИБКА: тег должен быть sha из 40 hex-символов' >&2; exit 2; }
+
+    NEW="$(mktemp /srv/tms/compose.yaml.XXXXXX)"
+    trap 'rm -f "$NEW" /srv/tms/.env.candidate' EXIT
+    cat > "$NEW"
+    [ -s "$NEW" ] || { echo 'ОШИБКА: на stdin приехал пустой compose.yaml' >&2; exit 2; }
+
+    sed "s|^SERVER_TAG=.*|SERVER_TAG=$TAG|" .env > .env.candidate
+
+    # Всё, что может упасть, падает ДО остановки работающего контейнера:
+    # опечатка в compose или отсутствующий образ оставят прод живым.
+    docker compose --project-name tms -f "$NEW" --env-file .env.candidate config -q
+    docker compose --project-name tms -f "$NEW" --env-file .env.candidate pull --quiet
+
+    # Мягкая остановка сеанса. Клиент увидит state=stopped и выйдет из
+    # waitForHls(), который опрашивает сервер без предела попыток: грязное
+    # убийство процесса — ровно тот случай, который его подвешивает.
+    curl -sf -m 3 http://127.0.0.1:8000/api/stop >/dev/null 2>&1 || true
+
+    cp .env .env.prev
+    mv .env.candidate .env
+    mv "$NEW" compose.yaml
+    trap - EXIT
+
+    dc up -d --remove-orphans
+    dc ps
+    echo "DEPLOYED $TAG"
+    ;;
+
+  rollback)
+    [ -f .env.prev ] || { echo 'ОШИБКА: нет .env.prev, откатываться некуда' >&2; exit 2; }
+    cp .env .env.failed
+    mv .env.prev .env
+    dc pull --quiet
+    dc up -d --remove-orphans
+    dc ps
+    echo "ROLLED BACK to $(grep '^SERVER_TAG=' .env)"
+    ;;
+
+  status)
+    dc ps
+    curl -sf -m 5 http://127.0.0.1:8000/api/status || { echo 'ОШИБКА: /api/status недоступен' >&2; exit 1; }
+    echo
+    ;;
+
+  playback)
+    # «idle», если активного сеанса нет: снимок отдаётся как playback:null.
+    body="$(curl -sf -m 5 http://127.0.0.1:8000/api/status || echo '{}')"
+    case "$body" in
+      *'"playback":null'*|'{}') echo idle ;;
+      *)                        echo busy ;;
+    esac
+    ;;
+
+  *)
+    echo 'ОШИБКА: запрещено. Разрешено: deploy <sha> | rollback | status | playback' >&2
+    exit 1
+    ;;
+esac

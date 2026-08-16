@@ -1,0 +1,53 @@
+# Полную сборку клиента в CI не прогнать: scripts/tizen-build-install.sh падает
+# на `sdb devices`, нужен сертификат подписи и телевизор в локальной сети.
+# Но три класса поломок ловятся и без телевизора, и один из них — тот самый
+# документированный футган, который иначе проявляется чёрным экраном на телевизоре.
+name: client
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'client/**'
+      - 'scripts/**'
+      - '.github/workflows/client.yml'
+  pull_request:
+    paths:
+      - 'client/**'
+      - 'scripts/**'
+      - '.github/workflows/client.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: client-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: ES5 — синтаксис и запрещённые рантайм-API
+        run: ./scripts/check-client-es5.sh
+
+      - name: каждый файл вписан в tizen_web_project.yaml
+        run: ./scripts/check-client-manifest.sh
+
+      - name: config.xml корректен и не сменил id приложения
+        run: |
+          set -euo pipefail
+          xmllint --noout client/config.xml
+          # Смена id заставляет телевизор считать сборку ДРУГИМ приложением:
+          # старое остаётся установленным, а сохранённый localStorage
+          # (rtv.server, rtv.positions) как будто исчезает.
+          grep -q 'IDwM3cpKkk.torrentmediaclient' client/config.xml \
+            || { echo '::error::сменился tizen:application id'; exit 1; }
+
+      - name: shellcheck
+        # SC1091 исключён: скрипт сборки делает source .env, а .env в .gitignore,
+        # проследовать за ним статическому анализу нечем.
+        run: shellcheck -e SC1091 scripts/*.sh
