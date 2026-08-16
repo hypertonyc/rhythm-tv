@@ -125,6 +125,7 @@ func (r *fakeReader) Close() error {
 
 var (
 	_ Source = (*Fake)(nil)
-	_ Source = (*Anacrolix)(nil)
+	_ Source = (*Torrent)(nil)
 	_ Reader = (*fakeReader)(nil)
+	_ Reader = (*boundReader)(nil)
 )

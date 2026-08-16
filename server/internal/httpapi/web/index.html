@@ -34,11 +34,37 @@
   .status-warn { color:#ffd166; }
   .status-bad { color:#ff7777; }
   .status-muted { color:#aaa; }
+  .hidden { display:none; }
+  /* Библиотека — единственное, что делают с телефона, поэтому строки крупные
+     и с большими кнопками: попасть пальцем важнее, чем уместить всё на экран. */
+  .torrent { display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+             margin:8px 0; padding:10px 12px; background:#151515; border:1px solid #333; border-radius:8px; }
+  .torrent.active { border-color:#79d279; }
+  .torrent .name { flex:1; min-width:200px; word-break:break-word; }
+  .torrent .badge { color:#79d279; white-space:nowrap; }
+  .danger { border-color:#803333; }
+  #torrentFile { flex:1; min-width:200px; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1 id="title">Torrent Media Server</h1>
+
+  <div class="statusbox">
+    <div class="row">
+      <strong>Torrents</strong>
+      <span id="libraryActive" class="grow small">…</span>
+      <button id="libToggle">Show</button>
+    </div>
+    <div id="libraryPanel" class="hidden">
+      <div class="row">
+        <input id="torrentFile" type="file" accept=".torrent,application/x-bittorrent">
+        <button id="uploadBtn">Upload</button>
+      </div>
+      <div id="libraryStatus" class="small"></div>
+      <div id="torrentList"></div>
+    </div>
+  </div>
 
   <div class="row">
     <button id="prev">◀ Previous</button>
@@ -94,6 +120,13 @@
   var playerStatus = document.getElementById('playerStatus');
   var lastServerStatus = null;
   var browserState = 'idle';
+  var libraryPanel = document.getElementById('libraryPanel');
+  var libraryStatus = document.getElementById('libraryStatus');
+  var libraryActive = document.getElementById('libraryActive');
+  var torrentList = document.getElementById('torrentList');
+  var torrentFile = document.getElementById('torrentFile');
+  /* Имя активного торрента: под ним хранятся позиции просмотра. */
+  var torrentKey = '';
 
   function setFullscreenSizing(on) {
     if (on) {
@@ -137,22 +170,77 @@
     try { localStorage.setItem(key, String(value)); } catch (e) {}
   }
 
+  /* Позиции и последняя серия хранятся ПО ТОРРЕНТУ: индекс файла сам по себе
+     ничего не значит, как только торрентов стало больше одного — тот же
+     индекс в другом торренте это другая серия. Ключ — имя торрента
+     из /api/files. Старый плоский формат подбирается на лету и относится
+     к тому торренту, который на тот момент был единственным. */
+  function readJson(key) {
+    try { return JSON.parse(get(key, '{}')); } catch (e) { return {}; }
+  }
+
+  function writeJson(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+  }
+
+  /* {торрент: {индекс: секунды}}; старый формат — плоское {индекс: секунды}. */
+  function allPositions() {
+    var data = readJson('tms.positions'), k;
+    if (!data || typeof data !== 'object') return {};
+    for (k in data) {
+      if (!Object.prototype.hasOwnProperty.call(data, k)) continue;
+      if (data[k] === null || typeof data[k] !== 'object') {
+        var wrapped = {};
+        if (torrentKey) wrapped[torrentKey] = data;
+        writeJson('tms.positions', wrapped);
+        return wrapped;
+      }
+    }
+    return data;
+  }
+
+  /* {торрент: индекс}; старый формат — просто число. */
+  function allLastEpisodes() {
+    var data = readJson('tms.lastEpisode');
+    if (data !== null && typeof data === 'object') return data;
+    var wrapped = {};
+    if (torrentKey && typeof data === 'number') wrapped[torrentKey] = data;
+    writeJson('tms.lastEpisode', wrapped);
+    return wrapped;
+  }
+
   function positions() {
-    try { return JSON.parse(get('tms.positions', '{}')) || {}; }
-    catch (e) { return {}; }
+    return allPositions()[torrentKey] || {};
+  }
+
+  function savePositions(p) {
+    var all = allPositions();
+    all[torrentKey] = p;
+    writeJson('tms.positions', all);
   }
 
   function savePosition(value) {
     if (currentIndex === null) return;
     var p = positions();
     p[String(currentIndex)] = Math.max(0, Math.floor(value));
-    try { localStorage.setItem('tms.positions', JSON.stringify(p)); } catch (e) {}
+    savePositions(p);
   }
 
   function clearPosition(index) {
     var p = positions();
     delete p[String(index)];
-    try { localStorage.setItem('tms.positions', JSON.stringify(p)); } catch (e) {}
+    savePositions(p);
+  }
+
+  function lastEpisode(fallback) {
+    var v = allLastEpisodes()[torrentKey];
+    return typeof v === 'number' ? v : fallback;
+  }
+
+  function saveLastEpisode(index) {
+    var all = allLastEpisodes();
+    all[torrentKey] = Number(index);
+    writeJson('tms.lastEpisode', all);
   }
 
   function xhrJson(url, callback) {
@@ -172,6 +260,21 @@
     var x = new XMLHttpRequest();
     x.open('GET', url, true);
     x.send();
+  }
+
+  function postJson(url, body, callback) {
+    var x = new XMLHttpRequest();
+    x.open('POST', url, true);
+    x.onreadystatechange = function () {
+      if (x.readyState !== 4) return;
+      var parsed = null;
+      try { parsed = JSON.parse(x.responseText); } catch (e) {}
+      if (x.status >= 200 && x.status < 300) callback(null, parsed);
+      else callback(new Error((parsed && parsed.error) || ('HTTP ' + x.status)));
+    };
+    /* Файл уходит телом как есть: multipart тут ничего не даёт, а сервер
+       принимает оба варианта. */
+    x.send(body);
   }
 
   function fmt(seconds) {
@@ -401,7 +504,7 @@
   function loadEpisode(index, automatic) {
     index = Number(index);
     currentIndex = index;
-    set('tms.lastEpisode', index);
+    saveLastEpisode(index);
     episode.value = String(index);
     status.textContent = 'Reading tracks...';
     browserState = 'probing';
@@ -495,9 +598,156 @@
     else status.textContent = 'Episode finished';
   });
 
+  /* ── Библиотека торрентов ─────────────────────────────────────────────
+     Отсюда торренты закачивают с телефона и отсюда же выбирают активный.
+     Активен всегда один, и это ровно тот, который видит телевизор. */
+
+  function setLibraryStatus(text, cls) {
+    libraryStatus.textContent = text || '';
+    libraryStatus.className = 'small ' + (cls || '');
+  }
+
+  function torrentRow(entry) {
+    var row = document.createElement('div');
+    row.className = 'torrent' + (entry.active ? ' active' : '');
+
+    var name = document.createElement('div');
+    name.className = 'name';
+    /* textContent, а не innerHTML: имя приходит из .torrent, то есть
+       из файла, который сюда кто-то загрузил. */
+    name.textContent = entry.name;
+    var meta = document.createElement('div');
+    meta.className = 'small';
+    meta.textContent = fmtBytes(entry.length) + ' · ' + entry.files + ' files';
+    name.appendChild(meta);
+    row.appendChild(name);
+
+    if (entry.active) {
+      var badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = '● on air';
+      row.appendChild(badge);
+    } else {
+      var play = document.createElement('button');
+      play.textContent = 'Watch this';
+      play.onclick = function () { activateTorrent(entry); };
+      row.appendChild(play);
+    }
+
+    var drop = document.createElement('button');
+    drop.className = 'danger';
+    drop.textContent = '✕';
+    drop.title = 'Remove from library';
+    drop.onclick = function () { deleteTorrent(entry); };
+    row.appendChild(drop);
+
+    return row;
+  }
+
+  function renderTorrents(data) {
+    var list = (data && data.torrents) || [];
+    var active = null;
+    torrentList.innerHTML = '';
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].active) active = list[i];
+      torrentList.appendChild(torrentRow(list[i]));
+    }
+    if (active) {
+      libraryActive.textContent = 'on air: ' + active.name;
+    } else {
+      /* Раскрывается сама: пока торрент не выбран, плеер всё равно пуст
+         (/api/files отвечает 503), а починка — здесь же, одной кнопкой. */
+      libraryActive.textContent = list.length ? 'nothing selected' : 'library is empty — upload a .torrent';
+      setLibraryVisible(true);
+    }
+  }
+
+  function loadTorrents() {
+    xhrJson('/api/torrents?_=' + Date.now(), function (err, data) {
+      if (err) {
+        setLibraryStatus('Cannot load the torrent list: ' + err.message, 'status-bad');
+        return;
+      }
+      renderTorrents(data);
+    });
+  }
+
+  function activateTorrent(entry) {
+    setLibraryStatus('Switching to ' + entry.name + '…', 'status-warn');
+    postJson('/api/torrents/' + entry.id + '/activate', null, function (err) {
+      if (err) {
+        setLibraryStatus('Cannot switch: ' + err.message, 'status-bad');
+        return;
+      }
+      /* Перезагрузка страницы, а не точечное обновление: сменился торрент —
+         сменились и список серий, и позиции просмотра, и текущий сеанс,
+         который сервер только что погасил. Пересобирать это вручную дороже
+         и риска больше, чем начать с чистого листа. */
+      location.reload();
+    });
+  }
+
+  function deleteTorrent(entry) {
+    if (!confirm('Remove "' + entry.name + '" from the library?')) return;
+    /* Скачанное удаляется только по отдельному подтверждению: это десятки
+       гигабайт, и вернуть их можно лишь повторной закачкой. */
+    var withData = confirm('Also delete downloaded data for "' + entry.name + '"?\n\n' +
+      'OK — delete files from disk, Cancel — keep them.');
+    setLibraryStatus('Removing ' + entry.name + '…', 'status-warn');
+    postJson('/api/torrents/' + entry.id + '/delete' + (withData ? '?data=1' : ''), null, function (err, data) {
+      if (err) {
+        setLibraryStatus('Cannot remove: ' + err.message, 'status-bad');
+        return;
+      }
+      if (entry.active) {
+        location.reload();
+        return;
+      }
+      setLibraryStatus('Removed.', 'status-ok');
+      renderTorrents(data);
+    });
+  }
+
+  function uploadTorrent() {
+    var file = torrentFile.files && torrentFile.files[0];
+    if (!file) {
+      setLibraryStatus('Pick a .torrent file first.', 'status-warn');
+      return;
+    }
+    setLibraryStatus('Uploading ' + file.name + '…', 'status-warn');
+    postJson('/api/torrents', file, function (err, data) {
+      if (err) {
+        setLibraryStatus('Upload failed: ' + err.message, 'status-bad');
+        return;
+      }
+      torrentFile.value = '';
+      /* Первый торрент в пустой библиотеке сервер включает сам —
+         тогда странице нужен полный перезапуск, как и при переключении. */
+      if (!torrentKey && data && data.active) {
+        location.reload();
+        return;
+      }
+      setLibraryStatus('Uploaded. Press “Watch this” to switch.', 'status-ok');
+      renderTorrents(data);
+    });
+  }
+
+  function setLibraryVisible(on) {
+    libraryPanel.className = on ? '' : 'hidden';
+    document.getElementById('libToggle').textContent = on ? 'Hide' : 'Show';
+  }
+
+  document.getElementById('libToggle').onclick = function () {
+    var on = libraryPanel.className === 'hidden';
+    setLibraryVisible(on);
+    if (on) loadTorrents();
+  };
+  document.getElementById('uploadBtn').onclick = uploadTorrent;
+
   autonext.checked = get('tms.autonext', '1') !== '0';
   pollServerStatus();
   setInterval(pollServerStatus, 1000);
+  loadTorrents();
 
   xhrJson('/api/files', function (err, data) {
     if (err) {
@@ -505,10 +755,11 @@
       return;
     }
     episodes = data.files;
+    torrentKey = data.torrent || '';
     document.getElementById('title').textContent = data.torrent;
     episode.innerHTML = '';
     for (var i = 0; i < episodes.length; i++) option(episode, String(episodes[i].index), episodes[i].name);
-    var last = Number(get('tms.lastEpisode', episodes.length ? episodes[0].index : 0));
+    var last = lastEpisode(episodes.length ? episodes[0].index : 0);
     var exists = false;
     for (var j = 0; j < episodes.length; j++) if (episodes[j].index === last) exists = true;
     if (!exists && episodes.length) last = episodes[0].index;

@@ -19,7 +19,9 @@ services:
   server:
     image: ${SERVER_IMAGE:?SERVER_IMAGE обязателен}:${SERVER_TAG:?SERVER_TAG обязателен}
     container_name: tms-server-dark
-    command: ["${TORRENT_FILE:?TORRENT_FILE обязателен}"]
+    # Пустое значение допустимо: каталог библиотеки задан через TORRENT_LIB,
+    # а активный торрент помнится в /data/.tms-active.
+    command: ["${TORRENT_FILE:-}"]
     restart: unless-stopped
     stop_grace_period: 15s
 
@@ -33,6 +35,7 @@ services:
     environment:
       PORT: "8000"
       TORRENT_PORT: "${TORRENT_PORT:-42070}"
+      TORRENT_LIB: /data
       # Тома СВОИ, не общие с боевым сервером: два торрент-клиента, пишущих
       # в одно хранилище, испортили бы его друг другу.
       TORRENT_STORE: /var/lib/tms/store
@@ -41,7 +44,10 @@ services:
       HLS_ALLOW_COPY: "${HLS_ALLOW_COPY:-1}"
 
     volumes:
-      - ${TORRENT_DIR:?TORRENT_DIR обязателен}:/data:ro
+      # Каталог библиотеки общий с боевым и НЕ :ro: тёмный экземпляр должен
+      # уметь принять загрузку. Внимание: .tms-active тоже общий, и смена
+      # активного торрента в тёмном экземпляре меняет его и для боевого.
+      - ${TORRENT_DIR:?TORRENT_DIR обязателен}:/data
       - dark-store:/var/lib/tms/store
       - dark-hls:/var/lib/tms/hls
 

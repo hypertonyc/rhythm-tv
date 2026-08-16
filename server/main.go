@@ -1,10 +1,13 @@
 // Команда server — медиасервер Rhythm TV: раздаёт файлы из торрента
 // и перекодирует их в HLS для телевизоров Samsung на Tizen 2.3.
 //
-// Один процесс — один торрент, один активный сеанс перекодирования.
-// Путь к .torrent — обязательный аргумент командной строки.
+// Торрентов на сервере может лежать сколько угодно (каталог TORRENT_LIB,
+// пополняется загрузкой с телефона), но АКТИВЕН всегда ровно один: его серии
+// видит телевизор, и на него же работает единственный сеанс перекодирования.
 //
-//	server /data/file.torrent
+//	server /data/file.torrent   # каталог библиотеки = каталог файла,
+//	                            # сам файл включается при первом запуске
+//	TORRENT_LIB=/data server    # без аргумента: активный берётся из .tms-active
 package main
 
 import (
@@ -22,6 +25,7 @@ import (
 
 	"github.com/avdav/torrent-media/server/internal/hls"
 	"github.com/avdav/torrent-media/server/internal/httpapi"
+	"github.com/avdav/torrent-media/server/internal/library"
 	"github.com/avdav/torrent-media/server/internal/media"
 	"github.com/avdav/torrent-media/server/internal/mediasource"
 )
@@ -37,11 +41,23 @@ func main() {
 		os.Exit(healthcheck(port))
 	}
 
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: server /data/file.torrent")
-		os.Exit(1)
+	// Аргумент необязателен: если он есть, торрент заносится в библиотеку
+	// и включается при первом запуске, а дальше выбор живёт в .tms-active
+	// и меняется с телефона. Каталог библиотеки — TORRENT_LIB, а без него
+	// каталог самого файла: так старая команда запуска работает как раньше.
+	torrentPath := ""
+	if len(os.Args) > 1 {
+		torrentPath = os.Args[1]
 	}
-	torrentPath := os.Args[1]
+	libDir := os.Getenv("TORRENT_LIB")
+	if libDir == "" {
+		if torrentPath == "" {
+			fmt.Fprintln(os.Stderr, "Usage: server /data/file.torrent   (или TORRENT_LIB=/data server)")
+			os.Exit(1)
+		}
+		libDir = filepath.Dir(torrentPath)
+	}
+
 	// Таймаут выбран чуть меньше 30-секундного XHR-таймаута телевизора,
 	// чтобы клиент увидел внятную ошибку, а не оборванный запрос.
 	probeTimeout := time.Duration(envInt("PROBE_TIMEOUT_MS", 25000)) * time.Millisecond
@@ -55,11 +71,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	source, err := mediasource.NewAnacrolix(mediasource.Options{
-		TorrentPath: torrentPath,
-		DataDir:     store,
-		ListenPort:  envInt("TORRENT_PORT", 0),
-		Seed:        os.Getenv("TORRENT_SEED") == "1",
+	client, err := mediasource.NewClient(mediasource.Options{
+		DataDir:    store,
+		ListenPort: envInt("TORRENT_PORT", 0),
+		Seed:       os.Getenv("TORRENT_SEED") == "1",
 		// На проде включено: иначе каждый деплой стирает уже скачанное.
 		PersistStore: os.Getenv("TORRENT_STORE_PERSIST") == "1",
 		// Нужно один раз при переезде с Node: раскладка на диске совпадает,
@@ -68,6 +83,29 @@ func main() {
 	})
 	if err != nil {
 		log.Fatalf("torrent: %v", err)
+	}
+
+	lib := library.New(libDir, store, func(path string) (mediasource.Source, error) {
+		// Явное присваивание интерфейсу, а не return client.Add(path):
+		// иначе при ошибке наружу уехал бы типизированный nil, который
+		// сравнение с nil не проходит.
+		t, err := client.Add(path)
+		if err != nil {
+			return nil, err
+		}
+		return t, nil
+	})
+
+	// Отсутствие активного торрента — не повод не стартовать: сервер поднимется
+	// с пустой библиотекой, отдавая ready:false, и первый же загруженный
+	// с телефона .torrent сам станет активным.
+	switch entry, err := lib.Restore(torrentPath); {
+	case err != nil:
+		log.Printf("библиотека %s: %v", libDir, err)
+	case entry.ID == "":
+		log.Printf("библиотека %s: активного торрента нет, ждём загрузки", libDir)
+	default:
+		log.Printf("библиотека %s: активен %q (%s)", libDir, entry.Name, entry.ID)
 	}
 
 	// ffmpeg и ffprobe читают торрент петлёй через наш же HTTP-порт.
@@ -80,9 +118,17 @@ func main() {
 
 	prober := &media.Prober{RawURL: rawURL, Timeout: probeTimeout}
 	manager := &hls.Manager{
-		AllowCopy:  allowCopy,
-		RawURL:     rawURL,
-		Downloaded: func() int64 { return source.Stats().Downloaded },
+		AllowCopy: allowCopy,
+		RawURL:    rawURL,
+		// Счётчик берётся у активного торрента на каждый вызов: после
+		// переключения downloadedSinceStart должен считаться по новому.
+		Downloaded: func() int64 {
+			src := lib.Current()
+			if src == nil {
+				return 0
+			}
+			return src.Stats().Downloaded
+		},
 	}
 
 	// Подбираем каталоги сеансов, оставшиеся от прежнего процесса: без этого
@@ -93,7 +139,7 @@ func main() {
 	}
 
 	handler := httpapi.New(httpapi.Deps{
-		Source:  source,
+		Library: lib,
 		Prober:  prober,
 		HLS:     manager,
 		BaseCtx: ctx,
@@ -118,12 +164,12 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	log.Println("shutting down")
-	shutdown(srv, manager, source, cancel)
+	shutdown(srv, manager, lib, client, cancel)
 }
 
 var shutdownOnce sync.Once
 
-func shutdown(srv *http.Server, manager *hls.Manager, source mediasource.Source, cancel context.CancelFunc) {
+func shutdown(srv *http.Server, manager *hls.Manager, lib *library.Library, client *mediasource.Client, cancel context.CancelFunc) {
 	shutdownOnce.Do(func() {
 		// Сторожевой таймер несущий, а не перестраховка: srv.Shutdown не может
 		// прервать горутину, стоящую внутри чтения из торрента, и без него
@@ -139,7 +185,10 @@ func shutdown(srv *http.Server, manager *hls.Manager, source mediasource.Source,
 		ctx, done := context.WithTimeout(context.Background(), 5*time.Second)
 		defer done()
 		_ = srv.Shutdown(ctx)
-		_ = source.Close()
+		// Сначала активный торрент, потом клиент: Client.Close по умолчанию
+		// сносит хранилище целиком, и делать это до снятия торрента незачем.
+		_ = lib.Close()
+		_ = client.Close()
 		os.Exit(0)
 	})
 }

@@ -1,6 +1,7 @@
 package mediasource
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,16 +32,16 @@ func TestCloseRespectsPersistStore(t *testing.T) {
 
 			// Клиент не поднимаем: проверяется ровно ветка очистки в Close,
 			// а сеть и рой к ней отношения не имеют.
-			a := &Anacrolix{dataDir: store, persistStore: c.persist, stop: make(chan struct{})}
-			if err := a.Close(); err != nil {
+			c := &Client{dataDir: store, persistStore: c.persist}
+			if err := c.Close(); err != nil {
 				t.Fatal(err)
 			}
 
 			_, err := os.Stat(payload)
 			switch {
-			case c.survives && err != nil:
+			case c.persistStore && err != nil:
 				t.Errorf("данные должны были уцелеть, но их нет: %v", err)
-			case !c.survives && err == nil:
+			case !c.persistStore && err == nil:
 				t.Error("данные должны были стереться, но остались")
 			}
 		})
@@ -49,11 +50,40 @@ func TestCloseRespectsPersistStore(t *testing.T) {
 
 // TestCloseIsIdempotent — Close зовётся и из shutdown, и из defer в main.
 func TestCloseIsIdempotent(t *testing.T) {
-	a := &Anacrolix{dataDir: t.TempDir(), persistStore: true, stop: make(chan struct{})}
-	if err := a.Close(); err != nil {
+	c := &Client{dataDir: t.TempDir(), persistStore: true}
+	if err := c.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Close(); err != nil {
+	if err := c.Close(); err != nil {
 		t.Fatalf("повторный Close упал: %v", err)
+	}
+}
+
+// TestTorrentCloseDoesNotTouchStore фиксирует, что смена активного торрента
+// не трогает диск. Хранилище общее на всю библиотеку: очистка при переключении
+// выбросила бы гигабайты остальных торрентов.
+func TestTorrentCloseDoesNotTouchStore(t *testing.T) {
+	store := t.TempDir()
+	payload := filepath.Join(store, "piece.dat")
+	if err := os.WriteFile(payload, []byte("чужие гигабайты"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tor := &Torrent{stop: make(chan struct{}), ctx: ctx, cancel: cancel}
+	if err := tor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Повторный Close случается на выключении процесса: библиотека закрывает
+	// активный торрент, а следом за ней тот же торрент закрывает клиент.
+	if err := tor.Close(); err != nil {
+		t.Fatalf("повторный Close упал: %v", err)
+	}
+
+	if _, err := os.Stat(payload); err != nil {
+		t.Errorf("данные соседнего торрента исчезли: %v", err)
+	}
+	if ctx.Err() == nil {
+		t.Error("контекст торрента должен быть отменён: иначе читатели не проснутся")
 	}
 }

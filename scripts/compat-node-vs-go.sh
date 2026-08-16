@@ -131,6 +131,28 @@ cmp_headers() {
   fi
 }
 
+# cmp_shell — сверка «/» без тела.
+#
+# Встроенный веб-клиент СОЗНАТЕЛЬНО разошёлся с эталоном: в него добавлена
+# библиотека торрентов (загрузка с телефона и выбор активного), которой
+# в Node нет и не будет. Сравнивать тело больше не с чем, поэтому
+# от корневой страницы проверяется то, что обязано совпадать по-прежнему:
+# код ответа и заголовки, кроме длины. Телевизор сюда не ходит вовсе —
+# «/» читает только браузер.
+cmp_shell() {
+  local name="$1"; shift
+  curl -s -D "$WORK/n.h" -o /dev/null --max-time 20 "$@" "$NODE${URLPATH}" 2>/dev/null
+  curl -s -D "$WORK/g.h" -o /dev/null --max-time 20 "$@" "$GO${URLPATH}" 2>/dev/null
+  norm_headers <"$WORK/n.h" | grep -v '^content-length' >"$WORK/n.hn"
+  norm_headers <"$WORK/g.h" | grep -v '^content-length' >"$WORK/g.hn"
+  if diff -q "$WORK/n.hn" "$WORK/g.hn" >/dev/null; then
+    PASS=$((PASS+1)); printf '  ok   %s\n' "$name"
+  else
+    FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$name"
+    diff "$WORK/n.hn" "$WORK/g.hn" | sed 's/^/       /' | head -12
+  fi
+}
+
 cmp_shape() {
   local name="$1"
   curl -s --max-time 30 "$NODE${URLPATH}" >"$WORK/n.b" 2>/dev/null
@@ -145,7 +167,7 @@ cmp_shape() {
 }
 
 echo "== детерминированная поверхность =="
-URLPATH=/                      cmp_full "GET /  (встроенный веб-клиент)"
+URLPATH=/                      cmp_shell "GET /  (веб-клиент: тело разошлось сознательно)"
 URLPATH=/api/files             cmp_full "GET /api/files"
 URLPATH=/api/stop              cmp_full "GET /api/stop"
 URLPATH=/api/stop              cmp_full "POST /api/stop (метод не проверяется)" -X POST

@@ -10,6 +10,14 @@
     var DEFAULT_SERVER = (window.RTV_CONFIG && window.RTV_CONFIG.defaultServer) || '';
 
     var serverBase = '';
+    /* Имя активного торрента (из /api/files). Под ним хранятся позиции
+     * просмотра, и по нему же замечается переключение торрента с телефона. */
+    var torrentKey = '';
+    var lastLibraryCheck = 0;
+    var lostSessionPolls = 0;
+    /* id сеанса, который мы сейчас играем: по нему отличается «сеанс погасили»
+     * от «сервер перезапустился и подобрал наш каталог». */
+    var currentSessionId = '';
     var episodes = [];
     var seasons = [];
     var seasonPos = 0;
@@ -76,9 +84,46 @@
         try { localStorage.setItem(key, String(value)); } catch (e) {}
     }
 
+    function readJson(key) {
+        try { return JSON.parse(storeGet(key, '{}')); } catch (e) { return {}; }
+    }
+
+    function writeJson(key, value) {
+        try { storeSet(key, JSON.stringify(value)); } catch (e) {}
+    }
+
+    /* Позиции просмотра хранятся ПО ТОРРЕНТУ: с тех пор как торрент можно
+     * переключить с телефона, индекс файла сам по себе ничего не значит —
+     * тот же индекс в другом торренте это другая серия.
+     * Ключ — имя торрента из /api/files.
+     *
+     * Старый плоский формат {индекс: секунды} подбирается при первом чтении
+     * и приписывается тому торренту, который активен сейчас: когда его
+     * записывали, торрент был один. */
+    function allPositions() {
+        var data = readJson('rtv.positions');
+        var wrapped, k;
+        if (!data || typeof data !== 'object') return {};
+        for (k in data) {
+            if (!Object.prototype.hasOwnProperty.call(data, k)) continue;
+            if (data[k] === null || typeof data[k] !== 'object') {
+                wrapped = {};
+                if (torrentKey) wrapped[torrentKey] = data;
+                writeJson('rtv.positions', wrapped);
+                return wrapped;
+            }
+        }
+        return data;
+    }
+
     function positions() {
-        try { return JSON.parse(storeGet('rtv.positions', '{}')) || {}; }
-        catch (e) { return {}; }
+        return allPositions()[torrentKey] || {};
+    }
+
+    function storePositions(p) {
+        var all = allPositions();
+        all[torrentKey] = p;
+        writeJson('rtv.positions', all);
     }
 
     function savedPosition(index) {
@@ -90,13 +135,35 @@
         if (index === null || index === undefined || !isFinite(seconds)) return;
         var p = positions();
         p[String(index)] = Math.max(0, Math.floor(seconds));
-        try { storeSet('rtv.positions', JSON.stringify(p)); } catch (e) {}
+        storePositions(p);
     }
 
     function clearPosition(index) {
         var p = positions();
         delete p[String(index)];
-        try { storeSet('rtv.positions', JSON.stringify(p)); } catch (e) {}
+        storePositions(p);
+    }
+
+    /* rtv.lastEpisode — тоже по торренту; старый формат был просто числом. */
+    function allLastEpisodes() {
+        var data = readJson('rtv.lastEpisode');
+        var wrapped;
+        if (data !== null && typeof data === 'object') return data;
+        wrapped = {};
+        if (torrentKey && typeof data === 'number') wrapped[torrentKey] = data;
+        writeJson('rtv.lastEpisode', wrapped);
+        return wrapped;
+    }
+
+    function lastEpisode(fallback) {
+        var v = allLastEpisodes()[torrentKey];
+        return typeof v === 'number' ? v : fallback;
+    }
+
+    function saveLastEpisode(index) {
+        var all = allLastEpisodes();
+        all[torrentKey] = Number(index);
+        writeJson('rtv.lastEpisode', all);
     }
 
     function cleanBase(value) {
@@ -505,7 +572,7 @@
         if (found) {
             seasonPos = found.seasonPos;
             episodePos = found.episodePos;
-            storeSet('rtv.lastEpisode', index);
+            saveLastEpisode(index);
             return true;
         }
         return false;
@@ -605,10 +672,13 @@
     }
 
     function loadLibrary(data) {
+        /* Имя торрента — ключ, под которым хранятся позиции просмотра,
+         * поэтому оно ставится ДО первого обращения к ним. */
+        torrentKey = data.torrent || '';
         buildSeasons(data.files || []);
         el('torrentTitle').innerHTML = data.torrent || 'Rhythm TV';
         autoNext = storeGet('rtv.autonext', '1') !== '0';
-        var last = Number(storeGet('rtv.lastEpisode', seasons.length && seasons[0].episodes.length ? seasons[0].episodes[0].index : 0));
+        var last = lastEpisode(seasons.length && seasons[0].episodes.length ? seasons[0].episodes[0].index : 0);
         if (!selectEpisodeIndex(last) && seasons.length && seasons[0].episodes.length) {
             seasonPos = 0;
             episodePos = 0;
@@ -616,6 +686,22 @@
         showMenu();
         refreshMeta();
         startStatusPolling();
+    }
+
+    /* Активный торрент выбирают с телефона, и телевизор обязан это заметить:
+     * иначе он останется со списком серий прежнего торрента, а индексы в нём
+     * указывают уже на другие файлы — «продолжить с 24-й минуты» открыло бы
+     * чужую серию. Сравнивается имя торрента: отдельного поля в /api/files нет,
+     * а менять его формат ради этого не стоит — он заморожен. */
+    function checkLibrary() {
+        api('/api/files', function (err, data) {
+            if (err || !data) return;
+            var name = data.torrent || '';
+            if (name === torrentKey) return;
+            meta = null;
+            loadLibrary(data);
+            setStatus('Torrent switched to ' + escapeHtml(name), 'ok');
+        }, 8000);
     }
 
     function showMenu() {
@@ -677,7 +763,7 @@
             }
             meta = data;
             choosePreferredTracks();
-            storeSet('rtv.lastEpisode', ep.index);
+            saveLastEpisode(ep.index);
             setStatus('Ready.', 'ok');
             refreshMenu();
             if (callback) callback(null, data);
@@ -883,6 +969,7 @@
                 showHud('Cannot start HLS: ' + err.message);
                 return;
             }
+            currentSessionId = data.id;
             startSubtitleOverlay(data.subtitlePlaylist || '');
             waitForHls(data.id, data.playlist);
         }, 30000);
@@ -929,6 +1016,8 @@
     function stopPlayback(toMenu, message) {
         if (meta) savePosition(meta.index, absoluteTime());
         restarting = false;
+        currentSessionId = '';
+        lostSessionPolls = 0;
         closeAvplay();
         apiIgnore('/api/stop');
         resetSubtitles();
@@ -980,7 +1069,59 @@
             if (mode === 'player' && s.playback && s.playback.state && s.playback.state !== 'ready' && s.playback.state !== 'finished') {
                 el('hudStatus').innerHTML = 'Server: ' + s.playback.state + ' · ' + (s.playback.segments || 0) + ' segments';
             }
+            if (mode === 'player') watchForLostSession(s);
+            else if (mode === 'menu') maybeCheckLibrary();
         }, 5000);
+    }
+
+    /* Наш сеанс перестал быть активным: так выглядит и /api/stop с телефона,
+     * и переключение активного торрента (оно гасит ffmpeg), и чужой /api/start.
+     * Два опроса подряд, а не один, потому что между закрытием AVPlay
+     * и новым /api/start сеанса законно нет — на этом и держится перемотка. */
+    function watchForLostSession(s) {
+        if (!currentSessionId || restarting) {
+            lostSessionPolls = 0;
+            return;
+        }
+        if (s.playback && s.playback.id === currentSessionId) {
+            lostSessionPolls = 0;
+            return;
+        }
+        lostSessionPolls++;
+        if (lostSessionPolls < 2) return;
+        lostSessionPolls = 0;
+        confirmSessionLost();
+    }
+
+    /* Пропажа сеанса из /api/status сама по себе НЕ означает, что играть нечего:
+     * после выкатки новый процесс подбирает каталоги прежнего, но активным
+     * такой сеанс не делает намеренно (иначе сервер навсегда считался бы
+     * занятым и заблокировал бы следующие выкатки). Наш сеанс при этом жив
+     * и доигрывается — прерывать его нельзя. Отличает случаи только снимок
+     * самого сеанса, поэтому спрашиваем именно про него.
+     *
+     * Ошибка ответа трактуется как «пока не знаем»: во время выкатки сервер
+     * недоступен несколько секунд, и выходить в меню из-за этого незачем —
+     * погашенный сеанс никуда не денется и ответит stopped на следующем опросе
+     * (его каталог живёт ещё две минуты). */
+    function confirmSessionLost() {
+        var id = currentSessionId;
+        api('/api/hls-status/' + encodeURIComponent(id) + '?_=' + new Date().getTime(), function (err, s) {
+            if (err || !s) return;
+            if (mode !== 'player' || currentSessionId !== id) return;
+            if (s.state !== 'stopped' && s.state !== 'replaced' && s.state !== 'error') return;
+            stopPlayback(true, 'Playback was stopped on the server.');
+            checkLibrary();
+        }, 8000);
+    }
+
+    /* В меню — раз в 10 секунд; во время просмотра список серий не нужен,
+     * а лишний XHR на этом железе стоит дороже, чем кажется. */
+    function maybeCheckLibrary() {
+        var now = new Date().getTime();
+        if (now - lastLibraryCheck < 10000) return;
+        lastLibraryCheck = now;
+        checkLibrary();
     }
 
     function startStatusPolling() {

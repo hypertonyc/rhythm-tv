@@ -42,8 +42,8 @@ func rawContentType(name string) string {
 
 // serveRaw отдаёт файл торрента по HTTP. Через этот же эндпоинт ffmpeg
 // и ffprobe читают торрент петлёй на 127.0.0.1.
-func (s *Server) serveRaw(w http.ResponseWriter, r *http.Request, index int) {
-	file, ok := s.file(index)
+func (s *Server) serveRaw(w http.ResponseWriter, r *http.Request, src mediasource.Source, index int) {
+	file, ok := s.file(src, index)
 	if !ok {
 		writeText(w, http.StatusNotFound, "File not found", contentTypeText)
 		return
@@ -64,7 +64,7 @@ func (s *Server) serveRaw(w http.ResponseWriter, r *http.Request, index int) {
 		if r.Method == http.MethodHead {
 			return
 		}
-		s.streamRange(w, r, index, 0, size-1)
+		s.streamRange(w, r, src, index, 0, size-1)
 		return
 	}
 
@@ -86,7 +86,7 @@ func (s *Server) serveRaw(w http.ResponseWriter, r *http.Request, index int) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	s.streamRange(w, r, index, start, end)
+	s.streamRange(w, r, src, index, start, end)
 }
 
 // parseRange разбирает заголовок Range по правилам оригинала.
@@ -132,8 +132,8 @@ func parseRange(value string, size int64) (start, end int64, ok bool) {
 // Reader закрывается обязательно: пока он жив, вокруг его позиции держится
 // окно приоритета, и торрент продолжает качаться уже после ухода клиента.
 // В Node ту же работу делал res.on('close', () => stream.destroy()).
-func (s *Server) streamRange(w http.ResponseWriter, r *http.Request, index int, start, end int64) {
-	reader, err := s.deps.Source.Open(index)
+func (s *Server) streamRange(w http.ResponseWriter, r *http.Request, src mediasource.Source, index int, start, end int64) {
+	reader, err := src.Open(index)
 	if err != nil {
 		return
 	}

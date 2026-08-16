@@ -9,59 +9,50 @@ import (
 
 const legacySource = "../../../legacy/server.mjs"
 
-// TestMatchesLegacy заново достаёт HTML из appHtml() в server.mjs и сравнивает.
-// Пока Node-эталон лежит в дереве, разъехаться эти два файла не могут.
+// TestDivergedFromLegacyOnPurpose.
 //
-// Когда legacy/ будет удалён, тест заменяется на сравнение с sha256-константой
-// из TestByteExact.
-func TestMatchesLegacy(t *testing.T) {
-	src, err := os.ReadFile(legacySource)
-	if err != nil {
-		t.Skipf("Node-эталон уже удалён (%v) — остаётся TestByteExact", err)
+// До появления библиотеки торрентов эта страница была ПОБАЙТОВОЙ копией
+// appHtml() из server.mjs, и тест сравнивал их напрямую. Сравнивать больше
+// нечего: в страницу добавлены загрузка .torrent с телефона и выбор активного
+// торрента, а в Node-эталоне этого нет и не появится.
+//
+// Поэтому проверяется обратное утверждение — что расхождение осознанное,
+// а не «страницу случайно откатили к эталону»: общий каркас (шапка, плеер)
+// на месте, а новая часть не потерялась. Заодно это ловит правку, которая
+// вырезала бы библиотеку целиком.
+func TestDivergedFromLegacyOnPurpose(t *testing.T) {
+	if _, err := os.ReadFile(legacySource); err != nil {
+		t.Skipf("Node-эталон уже удалён (%v) — остаются структурные проверки", err)
 	}
 
-	const (
-		fnMarker    = "function appHtml() {\n"
-		openMarker  = "  return `"
-		closeMarker = "`\n}"
-	)
-	fn := bytes.Index(src, []byte(fnMarker))
-	if fn < 0 {
-		t.Fatalf("в %s не нашлась appHtml()", legacySource)
-	}
-	open := bytes.Index(src[fn:], []byte(openMarker))
-	if open < 0 {
-		t.Fatalf("в appHtml() не нашлось начало шаблонной строки")
-	}
-	start := fn + open + len(openMarker)
-	closeAt := bytes.Index(src[start:], []byte(closeMarker))
-	if closeAt < 0 {
-		t.Fatalf("в appHtml() не нашёлся конец шаблонной строки")
-	}
-	want := src[start : start+closeAt]
-
-	// Перенос дословен ровно потому, что подставлять внутрь нечего.
-	// Если в шаблоне появится ${...} или экранированный обратный апостроф,
-	// сравнение ниже перестанет быть корректным — ловим это здесь.
-	if bytes.Contains(want, []byte("${")) || bytes.Contains(want, []byte("\\`")) {
-		t.Fatal("в шаблоне appHtml() появилась подстановка — простой перенос больше не годится")
+	// Куски, унаследованные от эталона: если их не стало, страницу
+	// переписали целиком и сверять её с чем-либо больше нельзя.
+	for _, marker := range []string{
+		`<video id="video" controls playsinline></video>`,
+		`'/api/start/'`,
+		`'/api/hls-status/'`,
+	} {
+		if !bytes.Contains(IndexHTML, []byte(marker)) {
+			t.Errorf("из страницы исчезло %q — это часть общего с эталоном плеера", marker)
+		}
 	}
 
-	if !bytes.Equal(IndexHTML, want) {
-		t.Errorf("index.html разъехался с appHtml(): %d байт против %d", len(IndexHTML), len(want))
+	// Новая часть, которой в эталоне нет.
+	for _, marker := range []string{`'/api/torrents'`, `id="torrentList"`} {
+		if !bytes.Contains(IndexHTML, []byte(marker)) {
+			t.Errorf("из страницы исчезла библиотека торрентов: нет %q", marker)
+		}
 	}
 }
 
 // TestByteExact ловит самую вероятную поломку: редактор дописал \n в конец,
-// Content-Length стал 20290, и ответ на «/» перестал совпадать с эталоном.
+// Content-Length разъехался с телом, и браузер получил обрезанную страницу.
+//
+// Точная длина здесь больше не проверяется: она имела смысл, пока страница
+// была заморожена по эталону, а теперь менялась бы при каждой правке верстки.
 func TestByteExact(t *testing.T) {
-	const wantLen = 20289
-
-	if len(IndexHTML) != wantLen {
-		t.Errorf("len(IndexHTML) = %d, ожидалось %d", len(IndexHTML), wantLen)
-	}
 	if bytes.HasSuffix(IndexHTML, []byte("\n")) {
-		t.Error("index.html заканчивается переводом строки — в appHtml() его нет")
+		t.Error("index.html заканчивается переводом строки — редактор дописал его молча")
 	}
 	if !bytes.HasSuffix(IndexHTML, []byte("</html>")) {
 		t.Error("index.html не заканчивается на </html>")
