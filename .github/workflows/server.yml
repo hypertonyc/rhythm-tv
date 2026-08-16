@@ -146,7 +146,17 @@ jobs:
   deploy:
     name: деплой
     needs: [build]
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    # Предохранитель на время переезда: пока на порту 8000 живёт прежний
+    # сервер на Node, автоматическая выкатка попыталась бы встать туда же
+    # и упала бы, успев дёрнуть /api/stop у живого сервера.
+    # Снимается одной командой, когда переезд состоится:
+    #   gh variable set DEPLOY_ENABLED --body true
+    # Ручная выкатка через deploy.yml (workflow_dispatch) работает всегда —
+    # она и нужна для самого переезда и для откатов.
+    if: >-
+      github.ref == 'refs/heads/main'
+      && github.event_name != 'pull_request'
+      && vars.DEPLOY_ENABLED == 'true'
     uses: ./.github/workflows/deploy.yml
     with:
       image_tag: ${{ github.sha }}

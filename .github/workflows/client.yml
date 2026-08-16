@@ -40,7 +40,9 @@ jobs:
       - name: config.xml корректен и не сменил id приложения
         run: |
           set -euo pipefail
-          xmllint --noout client/config.xml
+          # xmllint в образе ubuntu-latest больше не предустановлен,
+          # а ставить libxml2-utils ради одной проверки — лишняя минута.
+          python3 -c "import xml.etree.ElementTree as E; E.parse('client/config.xml')"
           # Смена id заставляет телевизор считать сборку ДРУГИМ приложением:
           # старое остаётся установленным, а сохранённый localStorage
           # (rtv.server, rtv.positions) как будто исчезает.

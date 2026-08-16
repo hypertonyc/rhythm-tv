@@ -16,6 +16,18 @@ deploy.yml:  playback == idle?
              └─ нет → падаем; образ уже в GHCR, ничего не потеряно
 ```
 
+**Автовыкатка выключена предохранителем** `DEPLOY_ENABLED` (переменная
+репозитория) — пока на порту 8000 работает прежний сервер на Node, деплой
+попытался бы встать туда же. Сборка при этом идёт как обычно, образ ложится
+в GHCR. Включить в момент переезда:
+
+```sh
+gh variable set DEPLOY_ENABLED --repo hypertonyc/rhythm-tv --body true
+```
+
+Ручная выкатка (`gh workflow run deploy.yml`) работает независимо от него —
+именно ей делается сам переезд и откаты.
+
 Образ помечается голым sha коммита. Только им и деплоим: он неизменяем,
 и `docker compose ps` на VPS называет точный коммит. `latest` существует
 для рук, деплоить его нельзя.
@@ -26,7 +38,7 @@ deploy.yml:  playback == idle?
 
 ```sh
 brew install gh && gh auth login
-gh repo create <owner>/torrent-media --private --source=. --remote=origin --push
+gh repo create hypertonyc/rhythm-tv --private --source=. --remote=origin --push
 ```
 
 В настройках репозитория:
@@ -80,7 +92,7 @@ sudo chown tmsdeploy:tmsdeploy /home/tmsdeploy/.ssh/authorized_keys
 sudo chmod 600 /home/tmsdeploy/.ssh/authorized_keys
 
 # доступ к приватному пакету GHCR
-sudo -u tmsdeploy bash -c 'read -rs PAT && echo "$PAT" | docker login ghcr.io -u <owner> --password-stdin'
+sudo -u tmsdeploy bash -c 'read -rs PAT && echo "$PAT" | docker login ghcr.io -u hypertonyc --password-stdin'
 
 sudo -u tmsdeploy cp deploy/.env.example /srv/rhythm-tv/.env
 sudo chmod 600 /srv/rhythm-tv/.env      # и отредактировать под себя

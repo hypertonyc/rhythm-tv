@@ -16,9 +16,11 @@ set -a
 source "$ROOT/.env"
 set +a
 
-[ -n "${TIZEN:-}" ] && [ -n "${TZCLI:-}" ] && [ -n "${SDB:-}" ] && [ -n "${TV:-}" ] \
-  && [ -n "${PROFILE:-}" ] && [ -n "${BUILD_DIR:-}" ] \
-  || { echo 'ERROR: .env must set TIZEN, TZCLI, SDB, TV, PROFILE, BUILD_DIR'; exit 1; }
+if [ -z "${TIZEN:-}" ] || [ -z "${TZCLI:-}" ] || [ -z "${SDB:-}" ] || [ -z "${TV:-}" ] \
+  || [ -z "${PROFILE:-}" ] || [ -z "${BUILD_DIR:-}" ]; then
+  echo 'ERROR: .env must set TIZEN, TZCLI, SDB, TV, PROFILE, BUILD_DIR'
+  exit 1
+fi
 
 BUILD="$CLIENT/$BUILD_DIR"
 
