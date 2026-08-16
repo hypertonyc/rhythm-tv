@@ -17,9 +17,15 @@ var ErrNotReady = errors.New("torrent metadata is loading")
 // File — то, что попадает в /api/files. Index это позиция в ПОЛНОМ списке файлов
 // торрента, а не в отфильтрованном списке видео: телевизор хранит по нему
 // rtv.positions и rtv.lastEpisode.
+//
+// Path — путь внутри торрента вместе с каталогами («Сезон 09/s09e01 - ….mkv»),
+// и наружу он НЕ отдаётся: в /api/files уходит только Name, последний сегмент,
+// как у webtorrent (ответ сверяется с Node-эталоном побайтово). Нужен он для
+// порядка серий — номер сезона сплошь и рядом есть только в имени каталога.
 type File struct {
 	Index  int
 	Name   string
+	Path   string
 	Length int64
 }
 

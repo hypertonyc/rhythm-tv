@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -374,8 +375,22 @@ func sourceFiles(src mediasource.Source) []mediasource.File {
 	return src.Files()
 }
 
-// videoFiles — фильтр серий из videoFiles(). Порядок НЕ меняется:
-// телевизор хранит позиции просмотра по индексу файла в торренте.
+// videoFiles — фильтр серий из videoFiles(), отсортированный по пути в торренте.
+//
+// Порядок метаинформации наружу не годится, и это осознанное расхождение
+// с эталоном: в паке «Друзья» файлы уложены по убыванию РАЗМЕРА, поэтому меню
+// телевизора внутри сезона шло s09e23-24, s09e06, s09e13, s09e21… Node вёл себя
+// так же, просто первый торрент (tbbt) был уложен по сериям, и на нём сортировка
+// ничего не переставляет — сверка с эталоном по-прежнему проходит.
+//
+// Сортировка здесь, а не в клиенте, потому что этим же порядком считаются
+// next/prev в /api/probe: иначе автопереход после серии уводил бы в соседнюю
+// по размеру (у «Друзей» — сразу в финал сериала), и то же самое пришлось бы
+// чинить второй раз в браузерном клиенте.
+//
+// ИНДЕКС остаётся индексом файла в торренте и от сортировки не зависит:
+// по нему телевизор хранит rtv.positions и rtv.lastEpisode, а сервер ищет файл
+// для /raw, /api/probe и /api/start.
 func (s *Server) videoFiles(src mediasource.Source) []mediasource.File {
 	all := sourceFiles(src)
 	out := make([]mediasource.File, 0, len(all))
@@ -384,7 +399,20 @@ func (s *Server) videoFiles(src mediasource.Source) []mediasource.File {
 			out = append(out, f)
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return media.NaturalLess(episodeSortKey(out[i]), episodeSortKey(out[j]))
+	})
 	return out
+}
+
+// episodeSortKey — путь целиком, если источник его знает. Имя файла как запасной
+// вариант хуже: в паках, где сезон вынесен в каталог, все серии называются
+// одинаково («01.mkv»), и по одним именам сезоны перемешались бы между собой.
+func episodeSortKey(f mediasource.File) string {
+	if f.Path != "" {
+		return f.Path
+	}
+	return f.Name
 }
 
 // neighbours — nextVideoIndex/prevVideoIndex: позиция в ОТФИЛЬТРОВАННОМ списке

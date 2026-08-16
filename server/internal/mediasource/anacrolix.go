@@ -285,7 +285,8 @@ func (t *Torrent) Files() []File {
 	for i, f := range all {
 		// webtorrent-овский file.name — это последний сегмент пути,
 		// а не путь целиком (проверено сверкой /api/files с эталоном).
-		files = append(files, File{Index: i, Name: path.Base(f.DisplayPath()), Length: f.Length()})
+		p := f.DisplayPath()
+		files = append(files, File{Index: i, Name: path.Base(p), Path: p, Length: f.Length()})
 	}
 	return files
 }

@@ -39,7 +39,12 @@ func NewFake(name string, paths ...string) (*Fake, error) {
 		if err != nil {
 			return nil, err
 		}
-		f.files = append(f.files, File{Index: i, Name: filepath.Base(p), Length: st.Size()})
+		f.files = append(f.files, File{
+			Index:  i,
+			Name:   filepath.Base(p),
+			Path:   filepath.ToSlash(p),
+			Length: st.Size(),
+		})
 	}
 	return f, nil
 }
