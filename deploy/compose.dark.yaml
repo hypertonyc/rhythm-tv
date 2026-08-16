@@ -1,0 +1,71 @@
+# Тёмный запуск Go-сервера РЯДОМ с живым Node на время переезда.
+#
+# Живое воспроизведение не трогается вообще: Node остаётся на 8000, Go встаёт
+# на 8001, у каждого свои тома и свой порт для пиров. Проверив Go на телевизоре
+# через второй путь в nginx, переключаем прокси одной строкой — и она же
+# служит откатом, пока Node стоит рядом горячим.
+#
+#   docker compose -p tms-dark -f deploy/compose.dark.yaml --env-file /srv/tms/.env.dark up -d
+#
+# После переезда этот файл удаляется вместе с legacy/.
+name: tms-dark
+
+services:
+  server:
+    image: ${SERVER_IMAGE:?SERVER_IMAGE обязателен}:${SERVER_TAG:?SERVER_TAG обязателен}
+    container_name: tms-server-dark
+    command: ["${TORRENT_FILE:?TORRENT_FILE обязателен}"]
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8001}:8000"
+      # Порт для пиров обязан отличаться от боевого: у anacrolix значение
+      # по умолчанию фиксированное, и второй экземпляр иначе не стартует.
+      - "${TORRENT_PORT:-42070}:${TORRENT_PORT:-42070}"
+      - "${TORRENT_PORT:-42070}:${TORRENT_PORT:-42070}/udp"
+
+    environment:
+      PORT: "8000"
+      TORRENT_PORT: "${TORRENT_PORT:-42070}"
+      # Тома СВОИ, не общие с боевым сервером: два торрент-клиента, пишущих
+      # в одно хранилище, испортили бы его друг другу.
+      TORRENT_STORE: /var/lib/tms/store
+      TMPDIR: /var/lib/tms/hls
+      TORRENT_STORE_PERSIST: "1"
+      HLS_ALLOW_COPY: "${HLS_ALLOW_COPY:-1}"
+
+    volumes:
+      - ${TORRENT_DIR:?TORRENT_DIR обязателен}:/data:ro
+      - dark-store:/var/lib/tms/store
+      - dark-hls:/var/lib/tms/hls
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    deploy:
+      resources:
+        limits:
+          # Вдвое скромнее боевых: пока идёт проверка, приоритет у живого сервера.
+          cpus: "${CPU_LIMIT:-1.5}"
+          memory: ${MEM_LIMIT:-1g}
+          pids: 512
+
+    # Защита выровнена с прежним боевым контейнером на Node: он работал
+    # именно так, и слабее делать незачем. Образ собран под uid 10001 —
+    # это тот же rhythm, что владеет /srv/rhythm-tv на хосте. Без совпадения
+    # uid контейнер с cap_drop: ALL не прочитает .torrent: без CAP_DAC_OVERRIDE
+    # даже root не обходит права -r--r-----.
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  dark-store:
+  dark-hls:

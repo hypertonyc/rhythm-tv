@@ -12,38 +12,47 @@
 # вместе с деплоем.
 set -euo pipefail
 umask 077
-cd /srv/tms
+
+# Пути под реальную раскладку VPS: данные и кэш там лежали ещё со времён
+# сервера на Node, и заводить рядом второй каталог незачем.
+BASE=/srv/rhythm-tv
+COMPOSE="$BASE/deploy/compose.yaml"
+ENVFILE="$BASE/.env"
+PROJECT=tms
+PORT=8000
+
+cd "$BASE"
 
 read -r -a ARGV <<< "${SSH_ORIGINAL_COMMAND:-}"
 VERB="${ARGV[0]:-}"
 
-dc() { docker compose --project-name tms -f /srv/tms/compose.yaml --env-file /srv/tms/.env "$@"; }
+dc() { docker compose --project-name "$PROJECT" -f "$COMPOSE" --env-file "$ENVFILE" "$@"; }
 
 case "$VERB" in
   deploy)
     TAG="${ARGV[1]:-}"
     [[ "$TAG" =~ ^[0-9a-f]{40}$ ]] || { echo 'ОШИБКА: тег должен быть sha из 40 hex-символов' >&2; exit 2; }
 
-    NEW="$(mktemp /srv/tms/compose.yaml.XXXXXX)"
-    trap 'rm -f "$NEW" /srv/tms/.env.candidate' EXIT
+    NEW="$(mktemp "$BASE/deploy/compose.yaml.XXXXXX")"
+    trap 'rm -f "$NEW" "$ENVFILE.candidate"' EXIT
     cat > "$NEW"
     [ -s "$NEW" ] || { echo 'ОШИБКА: на stdin приехал пустой compose.yaml' >&2; exit 2; }
 
-    sed "s|^SERVER_TAG=.*|SERVER_TAG=$TAG|" .env > .env.candidate
+    sed "s|^SERVER_TAG=.*|SERVER_TAG=$TAG|" "$ENVFILE" > "$ENVFILE.candidate"
 
     # Всё, что может упасть, падает ДО остановки работающего контейнера:
     # опечатка в compose или отсутствующий образ оставят прод живым.
-    docker compose --project-name tms -f "$NEW" --env-file .env.candidate config -q
-    docker compose --project-name tms -f "$NEW" --env-file .env.candidate pull --quiet
+    docker compose --project-name "$PROJECT" -f "$NEW" --env-file "$ENVFILE.candidate" config -q
+    docker compose --project-name "$PROJECT" -f "$NEW" --env-file "$ENVFILE.candidate" pull --quiet
 
     # Мягкая остановка сеанса. Клиент увидит state=stopped и выйдет из
     # waitForHls(), который опрашивает сервер без предела попыток: грязное
     # убийство процесса — ровно тот случай, который его подвешивает.
-    curl -sf -m 3 http://127.0.0.1:8000/api/stop >/dev/null 2>&1 || true
+    curl -sf -m 3 http://127.0.0.1:$PORT/api/stop >/dev/null 2>&1 || true
 
-    cp .env .env.prev
-    mv .env.candidate .env
-    mv "$NEW" compose.yaml
+    cp "$ENVFILE" "$ENVFILE.prev"
+    mv "$ENVFILE.candidate" "$ENVFILE"
+    mv "$NEW" "$COMPOSE"
     trap - EXIT
 
     dc up -d --remove-orphans
@@ -52,24 +61,24 @@ case "$VERB" in
     ;;
 
   rollback)
-    [ -f .env.prev ] || { echo 'ОШИБКА: нет .env.prev, откатываться некуда' >&2; exit 2; }
-    cp .env .env.failed
-    mv .env.prev .env
+    [ -f "$ENVFILE.prev" ] || { echo 'ОШИБКА: нет .env.prev, откатываться некуда' >&2; exit 2; }
+    cp "$ENVFILE" "$ENVFILE.failed"
+    mv "$ENVFILE.prev" "$ENVFILE"
     dc pull --quiet
     dc up -d --remove-orphans
     dc ps
-    echo "ROLLED BACK to $(grep '^SERVER_TAG=' .env)"
+    echo "ROLLED BACK to $(grep '^SERVER_TAG=' "$ENVFILE")"
     ;;
 
   status)
     dc ps
-    curl -sf -m 5 http://127.0.0.1:8000/api/status || { echo 'ОШИБКА: /api/status недоступен' >&2; exit 1; }
+    curl -sf -m 5 http://127.0.0.1:$PORT/api/status || { echo 'ОШИБКА: /api/status недоступен' >&2; exit 1; }
     echo
     ;;
 
   playback)
     # «idle», если активного сеанса нет: снимок отдаётся как playback:null.
-    body="$(curl -sf -m 5 http://127.0.0.1:8000/api/status || echo '{}')"
+    body="$(curl -sf -m 5 http://127.0.0.1:$PORT/api/status || echo '{}')"
     case "$body" in
       *'"playback":null'*|'{}') echo idle ;;
       *)                        echo busy ;;

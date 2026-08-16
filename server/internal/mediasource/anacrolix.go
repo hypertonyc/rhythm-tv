@@ -16,8 +16,9 @@ import (
 
 // Anacrolix — единственное место в проекте, которое знает про anacrolix/torrent.
 type Anacrolix struct {
-	client  *torrent.Client
-	dataDir string
+	client       *torrent.Client
+	dataDir      string
+	persistStore bool
 
 	// ready снимается один раз, когда приедут метаданные. До этого /api/files
 	// и /api/probe обязаны отдавать 503, как это делал Node с torrent === null.
@@ -43,6 +44,21 @@ type Options struct {
 	Seed bool
 	// ListenPort — порт для входящих пиров. Ноль отдаёт выбор библиотеке.
 	ListenPort int
+	// VerifyOnStart прогоняет хэш-проверку уже лежащих на диске данных.
+	//
+	// Нужно ровно один раз — при переезде с Node. Раскладка файлов у webtorrent
+	// и anacrolix совпадает (<хранилище>/<имя торрента>/<путь>), но база
+	// готовности кусков у anacrolix своя и пустая, поэтому без проверки он
+	// счёл бы все 27 ГБ отсутствующими и начал качать заново.
+	VerifyOnStart bool
+	// PersistStore оставляет скачанное на диске после остановки.
+	//
+	// Node стирал хранилище всегда (destroyStoreOnDestroy: true), и порт это
+	// сначала воспроизводил. На проде так нельзя: там уже лежат десятки
+	// гигабайт, и каждый деплой означал бы повторную закачку сериала целиком.
+	// Контракта с телевизором это не касается вовсе — поведение при выключении
+	// снаружи не наблюдаемо.
+	PersistStore bool
 }
 
 const defaultReadahead = 8 << 20
@@ -68,10 +84,11 @@ func NewAnacrolix(opts Options) (*Anacrolix, error) {
 	}
 
 	a := &Anacrolix{
-		client:  client,
-		dataDir: opts.DataDir,
-		meter:   NewMeter(5, func() int64 { return time.Now().UnixMilli() }),
-		stop:    make(chan struct{}),
+		client:       client,
+		dataDir:      opts.DataDir,
+		persistStore: opts.PersistStore,
+		meter:        NewMeter(5, func() int64 { return time.Now().UnixMilli() }),
+		stop:         make(chan struct{}),
 	}
 	if opts.Readahead == 0 {
 		opts.Readahead = defaultReadahead
@@ -86,6 +103,25 @@ func NewAnacrolix(opts Options) (*Anacrolix, error) {
 
 	go func() {
 		<-t.GotInfo()
+
+		if opts.VerifyOnStart {
+			// Проверка идёт ДО снятия флага готовности: иначе первое же чтение
+			// решило бы, что кусков нет, и потянуло бы их из сети заново.
+			// Клиент это переживает — он опрашивает /api/status и показывает
+			// «Torrent metadata loading…».
+			log.Printf("verifying existing data in %s, this can take a few minutes", opts.DataDir)
+			started := time.Now()
+			ctx, cancel := context.WithCancel(context.Background())
+			go func() { <-a.stop; cancel() }()
+			if err := t.VerifyDataContext(ctx); err != nil {
+				log.Printf("verify failed: %v (продолжаем; недостающее докачается)", err)
+			} else {
+				log.Printf("verified in %s: %s already on disk",
+					time.Since(started).Round(time.Second), humanBytes(t.BytesCompleted()))
+			}
+			cancel()
+		}
+
 		// DownloadAll() НЕ вызывается сознательно. У anacrolix куски по
 		// умолчанию имеют приоритет None, и это ровно то, что в webtorrent
 		// давал deselect:true: данные тянет только живой Reader.
@@ -198,16 +234,20 @@ func (a *Anacrolix) Stats() Stats {
 	}
 }
 
-// Close останавливает клиент и стирает хранилище.
+// Close останавливает клиент и, если не велено иначе, стирает хранилище.
 //
-// Стирание повторяет destroyStoreOnDestroy:true из Node: после рестарта серия
-// качается заново. Поведение сомнительное, но менять его надо отдельно и
-// осознанно (в плане это пункт бэклога TORRENT_STORE_PERSIST), а не заодно с портом.
+// Стирание — поведение Node (destroyStoreOnDestroy: true), и по умолчанию оно
+// сохранено. Но на проде, где уже лежат десятки гигабайт, каждый деплой означал
+// бы повторную закачку сериала целиком, поэтому есть TORRENT_STORE_PERSIST=1.
+// Наружу это не наблюдаемо: контракта с телевизором касается только то,
+// что сервер отвечает, а не то, что он делает при выключении.
 func (a *Anacrolix) Close() error {
 	a.stopOnce.Do(func() { close(a.stop) })
 	a.sampler.Wait()
-	a.client.Close()
-	if a.dataDir != "" {
+	if a.client != nil {
+		a.client.Close()
+	}
+	if a.dataDir != "" && !a.persistStore {
 		os.RemoveAll(a.dataDir)
 	}
 	return nil
@@ -224,3 +264,17 @@ func (c ctxReader) Read(p []byte) (int, error) { return c.r.ReadContext(c.ctx, p
 
 // WithContext оборачивает Reader в io.Reader, отменяемый контекстом.
 func WithContext(ctx context.Context, r Reader) io.Reader { return ctxReader{ctx: ctx, r: r} }
+
+// humanBytes печатает размер так, чтобы мелкие значения не превращались в «0.0 GB».
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}

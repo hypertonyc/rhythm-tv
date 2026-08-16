@@ -60,6 +60,11 @@ func main() {
 		DataDir:     store,
 		ListenPort:  envInt("TORRENT_PORT", 0),
 		Seed:        os.Getenv("TORRENT_SEED") == "1",
+		// На проде включено: иначе каждый деплой стирает уже скачанное.
+		PersistStore: os.Getenv("TORRENT_STORE_PERSIST") == "1",
+		// Нужно один раз при переезде с Node: раскладка на диске совпадает,
+		// а база готовности кусков у anacrolix своя и пустая.
+		VerifyOnStart: os.Getenv("TORRENT_VERIFY_ON_START") == "1",
 	})
 	if err != nil {
 		log.Fatalf("torrent: %v", err)

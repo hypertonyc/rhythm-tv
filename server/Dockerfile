@@ -30,7 +30,15 @@ COPY --from=build /out/server /usr/local/bin/server
 ENV TORRENT_STORE=/var/lib/tms/store \
     TMPDIR=/var/lib/tms/hls \
     PORT=8000
-RUN mkdir -p /var/lib/tms/store /var/lib/tms/hls
+RUN mkdir -p /var/lib/tms/store /var/lib/tms/hls \
+    && chown -R 10001:10001 /var/lib/tms
+
+# 10001 — не произвольное число, а uid пользователя rhythm на боевом хосте,
+# которому принадлежат /srv/rhythm-tv/{data,cache}. Совпадение обязательно:
+# контейнер запускается с cap_drop: ALL, а без CAP_DAC_OVERRIDE даже root
+# не прочитает чужой файл с правами -r--r-----. Прежний сервер на Node
+# работает под этим же uid.
+USER 10001:10001
 
 EXPOSE 8000
 # Собственная проверка вместо curl: лишний пакет в образе ради одного

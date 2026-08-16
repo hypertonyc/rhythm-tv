@@ -58,11 +58,29 @@ for _ in $(seq 1 60); do
 done
 [ "${n:-0}" = "1" ] && [ "${g:-0}" = "1" ] || { echo "серверы не поднялись"; tail -20 "$WORK/go.log"; exit 1; }
 
-# Транспортные заголовки (Date, Connection, Transfer-Encoding) отброшены:
-# они про соединение, а не про контракт.
+# Нормализация. Каждое правило здесь — осознанная уступка, а не заметание
+# расхождения под ковёр; новые различия по-прежнему всплывут.
+#
+#  1. Транспортные заголовки (Date, Connection, Transfer-Encoding) отброшены:
+#     они про соединение, а не про контракт.
+#  2. От строки статуса берётся только КОД. Пояснение к нему по RFC 9110
+#     ненормативно и клиентами не читается, а Go и Node формулируют 416
+#     по-разному: «Requested Range Not Satisfiable» против «Range Not
+#     Satisfiable». Сравнивать эти строки методически неверно.
+#  3. На ответах 416 отбрасывается Content-Length: 0. Node не шлёт его вовсе,
+#     Go добавляет сам, и убрать это можно только перехватом соединения.
+#     Тело в обоих случаях пустое, /raw читает один ffmpeg, телевизор сюда
+#     не ходит. Расхождение принято и записано в CLAUDE.md.
 norm_headers() {
-  grep -iE '^(HTTP/|content-type|content-length|content-range|cache-control|accept-ranges|access-control)' \
-    | tr -d '\r' | sed 's/^HTTP\/1\.1 /STATUS /' | tr '[:upper:]' '[:lower:]' | sort
+  awk '
+    /^HTTP\// { code = $2; print "status " code; next }
+    { print }
+  ' | grep -iE '^(status |content-type|content-length|content-range|cache-control|accept-ranges|access-control)' \
+    | tr -d '\r' | tr '[:upper:]' '[:lower:]' \
+    | awk '
+        { line[NR] = $0; if ($0 == "status 416") is416 = 1 }
+        END { for (i = 1; i <= NR; i++) if (!(is416 && line[i] == "content-length: 0")) print line[i] }
+      ' | sort
 }
 
 shape_of() {
@@ -146,8 +164,11 @@ URLPATH=/raw/99999999999999999999 cmp_full "GET /raw/<индекс больше 
 
 echo "== /raw и Range =="
 URLPATH=/raw/0 cmp_headers "HEAD /raw/0" -I
+# ВНИМАНИЕ: сюда нельзя добавлять curl-флаг -r. Он задаёт диапазон сам и
+# при пустом значении подавляет заголовок Range целиком — проверки тогда
+# сравнивают два обычных ответа 200 и проходят всегда. Так уже было.
 for rg in "0-1" "500-" "-500" "-0" "-" "0-1,3-4" "999999999999-" "5-2"; do
-  URLPATH=/raw/0 cmp_headers "GET /raw/0 Range: bytes=$rg" -H "Range: bytes=$rg" -r ''
+  URLPATH=/raw/0 cmp_headers "GET /raw/0 Range: bytes=$rg" -H "Range: bytes=$rg"
 done
 
 echo "== живая поверхность (сравнение формы) =="
