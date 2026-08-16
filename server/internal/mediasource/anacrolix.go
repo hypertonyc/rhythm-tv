@@ -27,6 +27,7 @@ type Client struct {
 	readahead    int64
 	verify       bool
 	warmupBytes  int64
+	onFileHealed func(index int)
 }
 
 // Options — настройки клиента.
@@ -63,6 +64,12 @@ type Options struct {
 	// на все торренты библиотеки, и стирать его при переключении значило бы
 	// выбрасывать чужие гигабайты.
 	PersistStore bool
+
+	// OnFileHealed зовётся, когда с файла сняли ложную отметку готовности
+	// (см. phantom.go), с его индексом в t.Files(). Нужно, чтобы выбросить
+	// разбор ffprobe: по нулям он возвращает правдоподобный мусор, который
+	// иначе остался бы в кэше навсегда. Может быть nil.
+	OnFileHealed func(index int)
 }
 
 const defaultReadahead = 8 << 20
@@ -93,6 +100,7 @@ func NewClient(opts Options) (*Client, error) {
 		readahead:    opts.Readahead,
 		verify:       opts.VerifyOnStart,
 		warmupBytes:  opts.WarmupBytes,
+		onFileHealed: opts.OnFileHealed,
 	}, nil
 }
 
@@ -146,7 +154,7 @@ func (c *Client) Add(torrentPath string) (*Torrent, error) {
 		// который сейчас перепроверяется, и получит нули. Полная проверка
 		// выше (c.verify) делает то же самое и надёжнее, но она стоит минут
 		// и включается руками, а эта — один stat на файл. См. phantom.go.
-		if healed := healPhantomFiles(ctx, t, c.dataDir); healed > 0 {
+		if healed := healPhantomFiles(ctx, t, c.dataDir, c.onFileHealed); healed > 0 {
 			log.Printf("phantom files: вылечено %d — недостающее докачается по требованию", healed)
 		}
 
@@ -176,7 +184,7 @@ func (c *Client) Add(torrentPath string) (*Torrent, error) {
 
 		// И дальше — на ходу: файл теряет данные во время просмотра, а не
 		// при старте, так что разовой проверки выше мало. См. phantom.go.
-		go watchPhantomFiles(ctx, t, c.dataDir)
+		go watchPhantomFiles(ctx, t, c.dataDir, c.onFileHealed)
 	}()
 
 	tr.sampler.Add(1)

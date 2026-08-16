@@ -71,6 +71,19 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// ffmpeg и ffprobe читают торрент петлёй через наш же HTTP-порт.
+	// Это не обходной путь, а несущая конструкция: на каждой перемотке ffmpeg
+	// рвёт ответ и заходит новым GET с новым Range, и именно так перекодирование
+	// из торрента вообще становится возможным.
+	rawURL := func(index int) string {
+		return fmt.Sprintf("http://127.0.0.1:%d/raw/%d", port, index)
+	}
+
+	// Prober создаётся ДО клиента торрента, хотя нужен позже: лечение фантомных
+	// файлов сбрасывает его кэш и начинается сразу после метаданных, то есть
+	// может успеть раньше любой строки ниже.
+	prober := &media.Prober{RawURL: rawURL, Timeout: probeTimeout}
+
 	client, err := mediasource.NewClient(mediasource.Options{
 		DataDir:    store,
 		ListenPort: envInt("TORRENT_PORT", 0),
@@ -84,6 +97,9 @@ func main() {
 		// на пустой рой и умирает. 256 КБ хватает, чтобы клиент объявился
 		// трекерам и поднял DHT.
 		WarmupBytes: int64(envInt("TORRENT_WARMUP_KB", 256)) << 10,
+		// Вылеченный файл надо перепрочитать: в кэше ffprobe мог осесть
+		// разбор нулей — с длительностью, но без дорожек субтитров.
+		OnFileHealed: prober.Forget,
 	})
 	if err != nil {
 		log.Fatalf("torrent: %v", err)
@@ -112,15 +128,6 @@ func main() {
 		log.Printf("библиотека %s: активен %q (%s)", libDir, entry.Name, entry.ID)
 	}
 
-	// ffmpeg и ffprobe читают торрент петлёй через наш же HTTP-порт.
-	// Это не обходной путь, а несущая конструкция: на каждой перемотке ffmpeg
-	// рвёт ответ и заходит новым GET с новым Range, и именно так перекодирование
-	// из торрента вообще становится возможным.
-	rawURL := func(index int) string {
-		return fmt.Sprintf("http://127.0.0.1:%d/raw/%d", port, index)
-	}
-
-	prober := &media.Prober{RawURL: rawURL, Timeout: probeTimeout}
 	manager := &hls.Manager{
 		AllowCopy: allowCopy,
 		RawURL:    rawURL,

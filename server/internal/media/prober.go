@@ -84,6 +84,22 @@ func (p *Prober) Probe(ctx context.Context, req Request) (*Result, error) {
 	return e.result, e.err
 }
 
+// Forget выбрасывает разобранное для одного файла, чтобы следующий запрос
+// прочитал его заново.
+//
+// Кэш успехов вечный, и это правильно ровно до тех пор, пока файл на диске
+// не меняется. Но он меняется: файл, помеченный скачанным, может оказаться
+// пустым (см. mediasource/phantom.go), и ffprobe по нулям возвращает не
+// ошибку, а правдоподобный мусор — длительность есть, дорожек субтитров нет,
+// pixFmt пустой. Такой разбор ложился в кэш навсегда, и телевизор показывал
+// «Subtitles: off» без возможности переключить даже после того, как файл
+// вылечили и докачали. Лечится не запретом кэша, а сбросом на починке.
+func (p *Prober) Forget(index int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.entries, index)
+}
+
 func (p *Prober) run(ctx context.Context, req Request) (*Result, error) {
 	binary := p.Binary
 	if binary == "" {

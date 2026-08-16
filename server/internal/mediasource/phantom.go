@@ -64,7 +64,7 @@ func isPhantom(length, allocated int64) bool {
 // watchPhantomFiles повторяет проверку, пока жив торрент. Выходит по отмене
 // контекста — он закрывается вместе с торрентом, так что снятый торрент
 // горутину за собой не оставляет.
-func watchPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string) {
+func watchPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string, onHealed func(index int)) {
 	ticker := time.NewTicker(phantomInterval)
 	defer ticker.Stop()
 	for {
@@ -72,7 +72,7 @@ func watchPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string) 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if healed := healPhantomFiles(ctx, t, dataDir); healed > 0 {
+			if healed := healPhantomFiles(ctx, t, dataDir, onHealed); healed > 0 {
 				log.Printf("phantom files: вылечено %d на ходу — недостающее докачается по требованию", healed)
 			}
 		}
@@ -83,11 +83,16 @@ func watchPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string) 
 // подозрительных файлов. Недостающее после этого докачается по требованию,
 // как и любые другие отсутствующие куски.
 //
+// onHealed зовётся на каждый вылеченный файл с его индексом — тем самым,
+// по которому файл спрашивают снаружи (порядок t.Files() наружу не меняется).
+// Нужен он для сброса кэша ffprobe: разбор нулей выглядит как успех
+// и оставался бы в кэше навсегда. Может быть nil.
+//
 // Возвращает число вылеченных файлов — ради теста и лога, больше это никому
 // не нужно.
-func healPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string) int {
+func healPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string, onHealed func(index int)) int {
 	healed := 0
-	for _, f := range t.Files() {
+	for index, f := range t.Files() {
 		if f.BytesCompleted() != f.Length() {
 			// Файл и так не считается целым: недостающее докачается само,
 			// перепроверять нечего.
@@ -113,6 +118,9 @@ func healPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string) i
 			}
 		}
 		healed++
+		if onHealed != nil {
+			onHealed(index)
+		}
 		log.Printf("phantom file %q: после перепроверки числится %s",
 			f.Path(), humanBytes(f.BytesCompleted()))
 	}
