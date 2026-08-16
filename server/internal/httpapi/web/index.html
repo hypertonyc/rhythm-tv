@@ -243,6 +243,18 @@
     writeJson('tms.lastEpisode', all);
   }
 
+  /* Сервер публикуется наружу reverse-proxy под путём с токеном
+     (…/<токен>/…), и этот префикс прокси срезает. Страница же ходит
+     по корневым путям вида /api/status — мимо префикса, то есть мимо
+     прокси: снаружи это 404 на каждом запросе, хотя сервер жив.
+     Поэтому префикс подставляется сам. Сервер отдаёт эту страницу
+     только на «/», значит всё, что стоит в пути до неё, и есть префикс. */
+  var proxyBase = location.pathname.replace(/\/+$/, '');
+
+  function apiUrl(path) {
+    return proxyBase + path;
+  }
+
   function xhrJson(url, callback) {
     var x = new XMLHttpRequest();
     x.open('GET', url, true);
@@ -347,7 +359,7 @@
   }
 
   function pollServerStatus() {
-    xhrJson('/api/status?_=' + Date.now(), function (err, s) {
+    xhrJson(apiUrl('/api/status') + '?_=' + Date.now(), function (err, s) {
       if (err) {
         torrentStatus.textContent = 'Torrent: status request failed: ' + err.message;
         torrentStatus.className = 'statusline small status-bad';
@@ -431,14 +443,14 @@
 
     if (meta && meta.next !== null && total > 0 && total - now < 90 && prebufferedFor !== meta.next) {
       prebufferedFor = meta.next;
-      ping('/api/prebuffer/' + meta.next);
+      ping(apiUrl('/api/prebuffer/' + meta.next));
       // Also probe the next episode so language matching is ready.
-      ping('/api/probe/' + meta.next);
+      ping(apiUrl('/api/probe/' + meta.next));
     }
   }
 
   function waitForHls(sessionId, playlist, automatic) {
-    xhrJson('/api/hls-status/' + encodeURIComponent(sessionId) + '?_=' + Date.now(), function (err, s) {
+    xhrJson(apiUrl('/api/hls-status/' + encodeURIComponent(sessionId)) + '?_=' + Date.now(), function (err, s) {
       if (err) {
         status.textContent = 'HLS status failed: ' + err.message;
         browserState = 'error';
@@ -458,7 +470,7 @@
       if (s.segments >= 2 || s.state === 'finished') {
         status.textContent = 'Opening Samsung-compatible HLS stream…';
         browserState = 'loading';
-        video.src = playlist + '?_=' + Date.now();
+        video.src = apiUrl(playlist) + '?_=' + Date.now();
         video.load();
         isPlaying = true;
         var p = video.play();
@@ -488,7 +500,7 @@
     browserState = 'starting';
     refreshHumanStatus();
 
-    var startUrl = '/api/start/' + currentIndex + '?audio=' + encodeURIComponent(audio.value || '') +
+    var startUrl = apiUrl('/api/start/' + currentIndex) + '?audio=' + encodeURIComponent(audio.value || '') +
       '&sub=' + encodeURIComponent(sub.value || 'off') + '&start=' + encodeURIComponent(seconds.toFixed(3)) + '&_=' + Date.now();
     xhrJson(startUrl, function (err, data) {
       if (err) {
@@ -514,7 +526,7 @@
     video.load();
     isPlaying = false;
 
-    xhrJson('/api/probe/' + index, function (err, data) {
+    xhrJson(apiUrl('/api/probe/' + index), function (err, data) {
       if (err) {
         status.textContent = 'Probe failed: ' + err.message;
         return;
@@ -663,7 +675,7 @@
   }
 
   function loadTorrents() {
-    xhrJson('/api/torrents?_=' + Date.now(), function (err, data) {
+    xhrJson(apiUrl('/api/torrents') + '?_=' + Date.now(), function (err, data) {
       if (err) {
         setLibraryStatus('Cannot load the torrent list: ' + err.message, 'status-bad');
         return;
@@ -674,7 +686,7 @@
 
   function activateTorrent(entry) {
     setLibraryStatus('Switching to ' + entry.name + '…', 'status-warn');
-    postJson('/api/torrents/' + entry.id + '/activate', null, function (err) {
+    postJson(apiUrl('/api/torrents/' + entry.id + '/activate'), null, function (err) {
       if (err) {
         setLibraryStatus('Cannot switch: ' + err.message, 'status-bad');
         return;
@@ -694,7 +706,7 @@
     var withData = confirm('Also delete downloaded data for "' + entry.name + '"?\n\n' +
       'OK — delete files from disk, Cancel — keep them.');
     setLibraryStatus('Removing ' + entry.name + '…', 'status-warn');
-    postJson('/api/torrents/' + entry.id + '/delete' + (withData ? '?data=1' : ''), null, function (err, data) {
+    postJson(apiUrl('/api/torrents/' + entry.id + '/delete') + (withData ? '?data=1' : ''), null, function (err, data) {
       if (err) {
         setLibraryStatus('Cannot remove: ' + err.message, 'status-bad');
         return;
@@ -715,7 +727,7 @@
       return;
     }
     setLibraryStatus('Uploading ' + file.name + '…', 'status-warn');
-    postJson('/api/torrents', file, function (err, data) {
+    postJson(apiUrl('/api/torrents'), file, function (err, data) {
       if (err) {
         setLibraryStatus('Upload failed: ' + err.message, 'status-bad');
         return;
@@ -749,7 +761,7 @@
   setInterval(pollServerStatus, 1000);
   loadTorrents();
 
-  xhrJson('/api/files', function (err, data) {
+  xhrJson(apiUrl('/api/files'), function (err, data) {
     if (err) {
       status.textContent = 'Cannot load file list: ' + err.message;
       return;
