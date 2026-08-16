@@ -1,0 +1,9 @@
+# Node-эталон в образ не едет: он нужен только сверке compat-node-vs-go.sh
+# и собирается своим Dockerfile'ом из server/legacy.
+legacy/
+
+# Разведка, тестовые эталоны и документация в рантайме бесполезны.
+cmd/spike/
+**/testdata/
+*.md
+.DS_Store

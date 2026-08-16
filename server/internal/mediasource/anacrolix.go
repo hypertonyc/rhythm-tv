@@ -56,6 +56,8 @@ func NewAnacrolix(opts Options) (*Anacrolix, error) {
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = opts.DataDir
 	cfg.Seed = opts.Seed
+	cfg.Logger = quietLogger()
+	cfg.Slogger = quietSlogger()
 	if opts.ListenPort != 0 {
 		cfg.ListenPort = opts.ListenPort
 	}

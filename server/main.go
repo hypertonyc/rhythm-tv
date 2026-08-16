@@ -27,13 +27,21 @@ import (
 )
 
 func main() {
+	port := envInt("PORT", 8000)
+
+	// Проверка живости для HEALTHCHECK в образе. Отдельный флаг, а не curl,
+	// потому что рантайм-образ иначе пришлось бы раздувать ради одного запроса.
+	// Бьём в /api/status: он отдаёт 200 ещё до загрузки метаданных, тогда как
+	// /api/files в это время отвечает 503 и контейнер флапал бы на каждом старте.
+	if len(os.Args) > 1 && os.Args[1] == "-healthcheck" {
+		os.Exit(healthcheck(port))
+	}
+
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: server /data/file.torrent")
 		os.Exit(1)
 	}
 	torrentPath := os.Args[1]
-
-	port := envInt("PORT", 8000)
 	// Таймаут выбран чуть меньше 30-секундного XHR-таймаута телевизора,
 	// чтобы клиент увидел внятную ошибку, а не оборванный запрос.
 	probeTimeout := time.Duration(envInt("PROBE_TIMEOUT_MS", 25000)) * time.Millisecond
@@ -122,6 +130,22 @@ func shutdown(srv *http.Server, manager *hls.Manager, source mediasource.Source,
 		_ = source.Close()
 		os.Exit(0)
 	})
+}
+
+// healthcheck возвращает код возврата для docker HEALTHCHECK.
+func healthcheck(port int) int {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/status", port))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "status %d\n", resp.StatusCode)
+		return 1
+	}
+	return 0
 }
 
 func envInt(name string, fallback int) int {

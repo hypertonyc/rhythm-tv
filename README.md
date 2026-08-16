@@ -8,18 +8,18 @@
 | Каталог | Что это |
 |---|---|
 | [client/](client/) | приложение для Samsung Smart TV (Tizen 2.3, телевизоры 2015 года) |
-| [server/](server/) | медиасервер на Node.js: торрент → ffmpeg → HLS + встроенный веб-клиент |
+| [server/](server/) | медиасервер на Go: торрент → ffmpeg → HLS + встроенный веб-клиент |
 | [scripts/](scripts/) | сборка и установка клиента на телевизор |
 | [.vscode/](.vscode/) | задача VS Code, запускающая сборку |
 
 ## Как это работает
 
 ```
-торрент  ──webtorrent──>  server/server.mjs  ──ffmpeg──>  HLS (MPEG-TS + WebVTT)
-                                 │                              │
-                                 │  /api/files, /api/probe       │  /hls/<id>/...
-                                 v                              v
-                          client/ на телевизоре  ──AVPlay──>  экран
+торрент  ──anacrolix──>  server/ (Go)  ──ffmpeg──>  HLS (MPEG-TS + WebVTT)
+                              │                          │
+                              │  /api/files, /api/probe   │  /hls/<id>/...
+                              v                          v
+                       client/ на телевизоре  ──AVPlay──>  экран
 ```
 
 Сервер держит один торрент на процесс, ничего не качает заранее и перекодирует
@@ -29,7 +29,7 @@
 
 ## Быстрый старт
 
-Сервер (нужен Docker, либо Node 22 + ffmpeg):
+Сервер (нужен Docker, либо Go 1.26 + ffmpeg):
 
 ```sh
 cd server
