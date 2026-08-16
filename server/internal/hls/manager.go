@@ -151,6 +151,9 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 	}
 	m.sessions[id] = s
 	m.active = s
+	// Пишется до запуска ffmpeg: каталог должен быть опознаваем, даже если
+	// процесс не стартует вовсе.
+	writeManifest(s)
 
 	cmd := exec.Command(m.ffmpeg(), args...)
 	// stdout выбрасывается, stderr копится в кольцевом буфере.
@@ -407,7 +410,9 @@ func (m *Manager) Shutdown() {
 		if s.cmd != nil && s.cmd.Process != nil && !s.exited {
 			_ = s.cmd.Process.Kill()
 		}
-		os.RemoveAll(s.dir)
+		// Каталог НЕ удаляется: его подберёт следующий процесс и продолжит
+		// отдавать сегменты, чтобы выкатка не обрывала просмотр.
+		// Мусор за собой уберёт он же — по TTL после подбора.
 		delete(m.sessions, id)
 	}
 	m.active = nil

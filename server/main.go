@@ -85,6 +85,13 @@ func main() {
 		Downloaded: func() int64 { return source.Stats().Downloaded },
 	}
 
+	// Подбираем каталоги сеансов, оставшиеся от прежнего процесса: без этого
+	// выкатка обрывала бы просмотр — у нового процесса нет состояния сеансов,
+	// и на /hls/<id>/... он отвечал бы 404. Делается ДО начала обслуживания.
+	if n := manager.AdoptOrphans(); n > 0 {
+		log.Printf("adopted %d session(s) from previous run", n)
+	}
+
 	handler := httpapi.New(httpapi.Deps{
 		Source:  source,
 		Prober:  prober,
