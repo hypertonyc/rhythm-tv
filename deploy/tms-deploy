@@ -48,10 +48,13 @@ case "$VERB" in
     docker compose --project-name "$PROJECT" -f "$NEW" --env-file "$ENVFILE.candidate" config -q
     docker compose --project-name "$PROJECT" -f "$NEW" --env-file "$ENVFILE.candidate" pull --quiet
 
-    # Мягкая остановка сеанса. Клиент увидит state=stopped и выйдет из
-    # waitForHls(), который опрашивает сервер без предела попыток: грязное
-    # убийство процесса — ровно тот случай, который его подвешивает.
-    curl -sf -m 3 http://127.0.0.1:$PORT/api/stop >/dev/null 2>&1 || true
+    # Здесь НЕ надо звать /api/stop. Раньше звали — тогда выкатка всё равно
+    # обрывала просмотр, и вежливее было сказать клиенту «сеанс остановлен»,
+    # чем дать ему висеть в waitForHls(). Теперь наоборот: каталоги сеансов
+    # переживают перезапуск, новый процесс их подбирает и продолжает отдавать
+    # сегменты. А /api/stop выставил бы state=stopped — одно из трёх состояний,
+    # на которых телевизор уходит в меню. То есть единственное, что оборвало бы
+    # просмотр, — это сама «вежливость».
 
     cp "$ENVFILE" "$ENVFILE.prev"
     mv "$ENVFILE.candidate" "$ENVFILE"
