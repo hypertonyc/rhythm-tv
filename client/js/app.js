@@ -31,6 +31,10 @@
     var mode = 'boot';
     var startOffset = 0;
     var lastPlayerTime = 0;
+    /* Когда AVPlay последний раз сообщал время. Ноль — картинка ещё не пошла.
+     * По этой отметке сторожится молчаливый простой, см. watchForStall. */
+    var lastPlayTimeAt = 0;
+    var stallLimitMs = 30000;
     var lastSavedAt = 0;
     var prebufferedFor = null;
     var hudTimer = null;
@@ -873,6 +877,7 @@
                     return;
                 }
                 lastPlayerTime = incoming;
+                lastPlayTimeAt = new Date().getTime();
                 updateHudClock();
                 updateSubtitleOverlay();
                 var now = new Date().getTime();
@@ -912,6 +917,7 @@
     function openPlaylist(url) {
         closeAvplay();
         lastPlayerTime = 0;
+        lastPlayTimeAt = 0;
         el('av-player').style.display = 'block';
         el('playerScreen').className = 'player-screen';
         el('menuScreen').className = 'screen hidden';
@@ -978,6 +984,7 @@
         seconds = Math.max(0, Math.min(Number(seconds) || 0, Math.max(0, durationSeconds() - 1)));
         startOffset = seconds;
         lastPlayerTime = 0;
+        lastPlayTimeAt = 0;
         prebufferedFor = null;
         resetSubtitles();
         restarting = true;
@@ -1098,8 +1105,10 @@
             if (mode === 'player' && s.playback && s.playback.state && s.playback.state !== 'ready' && s.playback.state !== 'finished') {
                 el('hudStatus').innerHTML = 'Server: ' + s.playback.state + ' · ' + (s.playback.segments || 0) + ' segments';
             }
-            if (mode === 'player') watchForLostSession(s);
-            else if (mode === 'menu') maybeCheckLibrary();
+            if (mode === 'player') {
+                watchForLostSession(s);
+                watchForStall();
+            } else if (mode === 'menu') maybeCheckLibrary();
         }, 5000);
     }
 
@@ -1157,6 +1166,33 @@
 
     /* В меню — раз в 10 секунд; во время просмотра список серий не нужен,
      * а лишний XHR на этом железе стоит дороже, чем кажется. */
+    /* Плеер молча встал. AVPlay на этой прошивке умеет остановиться, не сказав
+     * ничего: не пришёл сегмент (сервер перезапускали посреди серии, сеть
+     * моргнула) — и он просто перестаёт двигаться. Ни onerror, ни
+     * onbufferingstart, ни выхода по setTimeoutForBuffering. Снаружи это
+     * «зависло», и до этой ветки лечилось только пультом. Сеанс при этом
+     * жив и здоров, поэтому watchForLostSession тут бессилен: сторожить
+     * надо не сервер, а картинку.
+     *
+     * Ноль в отметке означает, что серия ещё не начинала играть — там сторожит
+     * waitForHls. Заодно это ограничивает нас одной попыткой на сеанс:
+     * перезапуск обнуляет отметку, и второй раз она взведётся, только если
+     * картинка действительно пошла. */
+    function watchForStall() {
+        if (mode !== 'player' || restarting || !lastPlayTimeAt) return;
+        if (new Date().getTime() - lastPlayTimeAt < stallLimitMs) return;
+
+        var state = '';
+        try { state = webapis.avplay.getState(); } catch (e) {}
+        // На паузе время стоять и должно.
+        if (state === 'PAUSED') return;
+
+        var resumeAt = absoluteTime();
+        lastPlayTimeAt = 0;
+        showHud('Playback stalled, restarting…');
+        startPlayback(resumeAt);
+    }
+
     function maybeCheckLibrary() {
         var now = new Date().getTime();
         if (now - lastLibraryCheck < 10000) return;
