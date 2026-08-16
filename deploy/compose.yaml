@@ -1,7 +1,8 @@
 # Прод-конфигурация для VPS.
 #
-# Приезжает по SSH на stdin при каждом деплое и ложится как /srv/tms/compose.yaml.
-# Все значения — из /srv/tms/.env, которого в git нет (шаблон — .env.example).
+# Приезжает по SSH на stdin при каждом деплое и ложится на VPS
+# как /srv/rhythm-tv/deploy/compose.yaml. Все значения — из соседнего .env,
+# которого в git нет (шаблон — .env.example).
 name: tms
 
 services:
