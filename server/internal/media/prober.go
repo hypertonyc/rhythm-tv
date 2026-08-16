@@ -22,6 +22,12 @@ type Request struct {
 	Name  string
 	Next  *int
 	Prev  *int
+	// External — дорожки субтитров из отдельных файлов, подобранные по имени
+	// серии (см. internal/subs). Кладутся в разбор вместе со встроенными
+	// и попадают в кэш вместе с ним: пак на диске меняется куда реже,
+	// чем опрашивается /api/probe. Обратная сторона — новый файл субтитров
+	// к УЖЕ разобранной серии подхватится только после Forget или рестарта.
+	External []SubtitleTrack
 }
 
 // Prober запускает ffprobe и кэширует разбор.
@@ -115,7 +121,12 @@ func (p *Prober) run(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ParseProbe(out, req.Index, req.Name, req.Next, req.Prev)
+	result, err := ParseProbe(out, req.Index, req.Name, req.Next, req.Prev)
+	if err != nil {
+		return nil, err
+	}
+	AttachExternal(result, req.External)
+	return result, nil
 }
 
 // runCapture — порт runCapture() из server.mjs.

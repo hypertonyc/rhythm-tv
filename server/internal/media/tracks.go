@@ -80,6 +80,43 @@ func NormalizeLanguage(tags map[string]any, ordinal int, kind string) (code, lab
 	return fmt.Sprintf("%s-%d", kind, ordinal+1), fmt.Sprintf("%s %d", fallback, ordinal+1)
 }
 
+// LanguageFor опознаёт язык по одному слову — названию каталога или суффиксу
+// имени файла с субтитрами (см. internal/subs).
+//
+// Таблица здесь та же, что у дорожек внутри файла, и это главное: каталог
+// «rus» обязан дать код rus, тот же самый, что встроенная русская дорожка,
+// иначе сохранённый на телевизоре выбор перестал бы совпадать.
+func LanguageFor(token string) (code, label string, ok bool) {
+	token = strings.ToLower(token)
+	for _, lang := range languages {
+		if lang.latin.MatchString(token) || lang.cyrillic.MatchString(token) {
+			return lang.code, lang.label, true
+		}
+	}
+	return "", "", false
+}
+
+// AttachExternal дописывает к разбору дорожки, которых в файле нет.
+//
+// Вызывается ПОСЛЕ ParseProbe, потому что про файлы рядом с сервером знает
+// не ffprobe, а вызывающий. Дизамбигуация прогоняется заново по общему
+// списку: внешний «rus» рядом со встроенным «rus» обязан стать «rus-2»,
+// иначе ChooseTrack нашёл бы первый попавшийся и вторая дорожка была бы
+// недостижима. Повторный прогон безопасен — на уже уникальном списке
+// Disambiguate ничего не меняет.
+func AttachExternal(r *Result, tracks []SubtitleTrack) {
+	if r == nil || len(tracks) == 0 {
+		return
+	}
+	for _, t := range tracks {
+		t.Index = -1
+		t.RelativeIndex = len(r.Subtitles)
+		t.Default = false
+		r.Subtitles = append(r.Subtitles, t)
+	}
+	DisambiguateAll(r.Audio, r.Subtitles)
+}
+
 // Disambiguate — disambiguateTracks(): коды и подписи обязаны быть уникальными.
 //
 // ChooseTrack ищет дорожку по коду, и при двух русских дорожках (дубляж +

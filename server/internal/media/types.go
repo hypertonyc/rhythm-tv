@@ -59,4 +59,16 @@ type SubtitleTrack struct {
 	Label         string `json:"label"`
 	Codec         string `json:"codec"`
 	Default       bool   `json:"default"`
+
+	// SourcePath — путь к отдельному файлу субтитров, если дорожка взята
+	// не из самой серии (см. internal/subs). Пустая строка означает обычный
+	// поток внутри файла, и тогда Index — его номер для `-map 0:N`.
+	//
+	// В JSON поля НЕТ намеренно: ответ /api/probe сверяется с Node-эталоном
+	// побайтово, а телевизору путь на сервере не нужен и знать он о нём
+	// не должен. Дорожка отличается для него только кодом и подписью.
+	SourcePath string `json:"-"`
 }
+
+// External — дорожка лежит отдельным файлом, а не потоком внутри серии.
+func (t *SubtitleTrack) External() bool { return t != nil && t.SourcePath != "" }

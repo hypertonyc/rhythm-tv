@@ -28,6 +28,7 @@ import (
 	"github.com/avdav/torrent-media/server/internal/library"
 	"github.com/avdav/torrent-media/server/internal/media"
 	"github.com/avdav/torrent-media/server/internal/mediasource"
+	"github.com/avdav/torrent-media/server/internal/subs"
 )
 
 func main() {
@@ -56,6 +57,15 @@ func main() {
 			os.Exit(1)
 		}
 		libDir = filepath.Dir(torrentPath)
+	}
+
+	// Каталог с файлами субтитров. По умолчанию — подкаталог библиотеки:
+	// скан библиотеки ищет *.torrent через ReadDir и в подкаталоги не заходит,
+	// так что пак ему не мешает, а на VPS /data уже смонтирован на запись —
+	// новых томов и правок compose не нужно.
+	subsDir := os.Getenv("SUBS_DIR")
+	if subsDir == "" {
+		subsDir = filepath.Join(libDir, "subs")
 	}
 
 	// Таймаут выбран чуть меньше 30-секундного XHR-таймаута телевизора,
@@ -149,10 +159,18 @@ func main() {
 		log.Printf("adopted %d session(s) from previous run", n)
 	}
 
+	subtitles := subs.New(subsDir)
+	if n := subtitles.Count(); n > 0 {
+		log.Printf("субтитры %s: найдено %d файл(ов)", subsDir, n)
+	} else {
+		log.Printf("субтитры %s: пусто, серии показываются только со встроенными", subsDir)
+	}
+
 	handler := httpapi.New(httpapi.Deps{
 		Library: lib,
 		Prober:  prober,
 		HLS:     manager,
+		Subs:    subtitles,
 		BaseCtx: ctx,
 	})
 

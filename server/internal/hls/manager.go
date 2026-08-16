@@ -13,6 +13,7 @@ import (
 
 	"github.com/avdav/torrent-media/server/internal/jscompat"
 	"github.com/avdav/torrent-media/server/internal/media"
+	"github.com/avdav/torrent-media/server/internal/subs"
 )
 
 const (
@@ -82,6 +83,20 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
+	// Субтитры из отдельного файла раскладываются в каталог сеанса ДО запуска
+	// ffmpeg — он о них ничего не знает (см. BuildArgs). Побочно это выходит
+	// лучше встроенных: телевизор получает весь текст серии сразу, не дожидаясь,
+	// пока перекодирование доползёт до нужной минуты.
+	//
+	// Неудача не повод не показывать серию: пропавший или битый файл гасит
+	// дорожку и только её.
+	if subtitle.External() {
+		if err := subs.WriteSession(dir, subtitle.SourcePath, opts.Start, meta.Duration); err != nil {
+			log.Printf("HLS [%d] субтитры %s: %v", opts.Index, subtitle.SourcePath, err)
+			subtitle = nil
+		}
+	}
+
 	copyVideo := media.CanCopyVideo(meta.Video, opts.Start, m.AllowCopy)
 	copyAudio := audio != nil && media.CanCopyAudio(audio, opts.Start, m.AllowCopy)
 
@@ -112,7 +127,7 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 		opts.Index, codeOr(audio != nil, audioCode(audio), "none"),
 		codeOr(subtitle != nil, subCode(subtitle), "off"),
 		jscompat.ToFixed(opts.Start, 1), videoMode, audioMode,
-		codeOr(subtitle != nil, "webvtt", "no-subs"))
+		codeOr(subtitle != nil, codeOr(subtitle.External(), "webvtt-file", "webvtt"), "no-subs"))
 
 	// Дальше — один блок под локом, без единой точки ожидания внутри.
 	// Ровно так же устроен оригинал: между mkdir и spawn там нет await.

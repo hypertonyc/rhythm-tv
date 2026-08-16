@@ -16,6 +16,7 @@ import (
 	"github.com/avdav/torrent-media/server/internal/library"
 	"github.com/avdav/torrent-media/server/internal/media"
 	"github.com/avdav/torrent-media/server/internal/mediasource"
+	"github.com/avdav/torrent-media/server/internal/subs"
 )
 
 // Маршруты. Классы символов расписаны по буквам там, где в оригинале стоял
@@ -73,6 +74,9 @@ type Deps struct {
 	Library Torrents
 	Prober  *media.Prober
 	HLS     Sessions
+	// Subs — субтитры, лежащие отдельными файлами рядом с сервером. nil
+	// означает «каталога нет», и тогда всё работает как раньше.
+	Subs *subs.Library
 	// BaseCtx живёт столько же, сколько процесс. Нужен префетчу: контекст
 	// запроса там не годится (см. handlePrebuffer).
 	BaseCtx context.Context
@@ -413,6 +417,9 @@ func (s *Server) probe(ctx context.Context, src mediasource.Source, index int) (
 	next, prev := s.neighbours(src, index)
 	return s.deps.Prober.Probe(ctx, media.Request{
 		Index: index, Name: file.Name, Next: next, Prev: prev,
+		// Файлы субтитров ищутся по имени серии, а не по индексу: индекс
+		// принадлежит торренту и после переключения означает другой файл.
+		External: s.deps.Subs.TracksFor(file.Name),
 	})
 }
 
