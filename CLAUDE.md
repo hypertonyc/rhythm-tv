@@ -11,7 +11,8 @@ Rhythm TV — медиасервер и клиент к нему для Samsung 
 client/     приложение для телевизора: index.html, js/app.js, css/, config.xml,
             tizen_web_project.yaml, .tproject
 server/     сервер на Go: main.go, internal/*, Dockerfile
-            legacy/server.mjs — прежний сервер на Node, теперь эталон для сверки
+            legacy/server.mjs — прежний сервер на Node. С прода удалён,
+            в репозитории остаётся эталоном для сверки и источником golden-файлов
 scripts/    tizen-build-install.sh — сборка, подпись и установка на телевизор
             compat-node-vs-go.sh — сверка Go-сервера с Node-эталоном
 data/       .torrent-файлы, в .gitignore
