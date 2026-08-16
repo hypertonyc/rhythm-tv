@@ -17,7 +17,10 @@ umask 077
 # сервера на Node, и заводить рядом второй каталог незачем.
 BASE=/srv/rhythm-tv
 COMPOSE="$BASE/deploy/compose.yaml"
-ENVFILE="$BASE/.env"
+# .env лежит в deploy/, а не в $BASE: скрипту надо создавать рядом с ним
+# временные .env.candidate и .env.prev, а $BASE принадлежит root — и давать
+# туда запись деплой-пользователю значило бы дать её же к data/ и cache/.
+ENVFILE="$BASE/deploy/.env"
 PROJECT=tms
 PORT=8000
 

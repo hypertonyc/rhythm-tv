@@ -94,8 +94,8 @@ sudo chmod 600 /home/tmsdeploy/.ssh/authorized_keys
 # доступ к приватному пакету GHCR
 sudo -u tmsdeploy bash -c 'read -rs PAT && echo "$PAT" | docker login ghcr.io -u hypertonyc --password-stdin'
 
-sudo -u tmsdeploy cp deploy/.env.example /srv/rhythm-tv/.env
-sudo chmod 600 /srv/rhythm-tv/.env      # и отредактировать под себя
+sudo -u tmsdeploy cp deploy/.env.example /srv/rhythm-tv/deploy/.env
+sudo chmod 600 /srv/rhythm-tv/deploy/.env      # и отредактировать под себя
 ```
 
 `restrict` (OpenSSH ≥ 7.2) уже включает запрет проброса портов, агента, pty
@@ -169,7 +169,7 @@ ssh tmsdeploy@<vps> "deploy <sha>" < deploy/compose.yaml
 ssh -i ~/.ssh/tms-deploy tmsdeploy@<vps> rollback
 ```
 
-Предыдущий sha скрипт хранит в `/srv/rhythm-tv/.env.prev`.
+Предыдущий sha скрипт хранит в `/srv/rhythm-tv/deploy/.env.prev`.
 
 Из GitHub:
 
