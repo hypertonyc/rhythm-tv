@@ -26,6 +26,7 @@ type Client struct {
 	persistStore bool
 	readahead    int64
 	verify       bool
+	warmupBytes  int64
 }
 
 // Options — настройки клиента.
@@ -47,6 +48,9 @@ type Options struct {
 	// готовности кусков у anacrolix своя и пустая, поэтому без проверки он
 	// счёл бы все 27 ГБ отсутствующими и начал качать заново.
 	VerifyOnStart bool
+	// WarmupBytes — сколько байт прочитать при старте, чтобы поднять рой.
+	// Ноль отключает разогрев. См. warmSwarm.
+	WarmupBytes int64
 	// PersistStore оставляет скачанное на диске после остановки.
 	//
 	// Node стирал хранилище всегда (destroyStoreOnDestroy: true), и порт это
@@ -88,6 +92,7 @@ func NewClient(opts Options) (*Client, error) {
 		persistStore: opts.PersistStore,
 		readahead:    opts.Readahead,
 		verify:       opts.VerifyOnStart,
+		warmupBytes:  opts.WarmupBytes,
 	}, nil
 }
 
@@ -144,6 +149,19 @@ func (c *Client) Add(torrentPath string) (*Torrent, error) {
 			f.SetPriority(torrent.PiecePriorityNone)
 		}
 		tr.tor.Store(t)
+
+		// Разогрев ДО снятия флага готовности, а не после. Иначе сервер
+		// объявляет себя готовым, ещё не имея пиров, телевизор сразу лезет
+		// с /api/probe и /api/start — и получает «ffprobe timed out» или
+		// сеанс, умерший в state=error. Пока флага нет, клиент показывает
+		// «Torrent metadata loading…» и спокойно опрашивает дальше.
+		//
+		// Уже начатый до выкатки просмотр это не задевает: его сегменты
+		// лежат на диске, а подобранный сеанс отдаётся без участия торрента.
+		if c.warmupBytes > 0 {
+			tr.warmSwarm(t, c.warmupBytes)
+		}
+
 		tr.ready.Store(true)
 		log.Printf("torrent ready: %q, %d files", t.Name(), len(t.Files()))
 	}()
@@ -351,4 +369,28 @@ func humanBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// warmSwarm читает несколько килобайт, чтобы клиент нашёл пиров заранее.
+//
+// Пиры подключаются только при спросе: куски имеют приоритет None, и пока нет
+// живого Reader, клиент никого не ищет. Из-за этого сразу после перезапуска
+// первый же сеанс попадает на пустой рой, чтение через /raw встаёт, и ffmpeg
+// выходит — сеанс уходит в state=error, хотя через минуту всё заработало бы.
+//
+// Читается ПОСЛЕ снятия флага готовности: разогрев не задерживает ответы
+// сервера, он лишь сокращает окно. Ошибка не важна — это оптимизация.
+func (tr *Torrent) warmSwarm(t *torrent.Torrent, want int64) {
+	files := t.Files()
+	if len(files) == 0 {
+		return
+	}
+	r := files[0].NewReader()
+	defer r.Close()
+
+	started := time.Now()
+	n, err := io.CopyN(io.Discard, ctxReader{ctx: tr.ctx, r: r}, want)
+	log.Printf("swarm warmup: %s in %s, peers=%d (err=%v)",
+		humanBytes(n), time.Since(started).Round(time.Millisecond),
+		t.Stats().ActivePeers, err)
 }

@@ -80,6 +80,10 @@ func main() {
 		// Нужно один раз при переезде с Node: раскладка на диске совпадает,
 		// а база готовности кусков у anacrolix своя и пустая.
 		VerifyOnStart: os.Getenv("TORRENT_VERIFY_ON_START") == "1",
+		// Разогрев роя: без него первый сеанс после перезапуска попадает
+		// на пустой рой и умирает. 256 КБ хватает, чтобы клиент объявился
+		// трекерам и поднял DHT.
+		WarmupBytes: int64(envInt("TORRENT_WARMUP_KB", 256)) << 10,
 	})
 	if err != nil {
 		log.Fatalf("torrent: %v", err)

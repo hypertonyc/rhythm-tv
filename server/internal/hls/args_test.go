@@ -73,6 +73,12 @@ func TestBuildArgsMatchesNodeGolden(t *testing.T) {
 				CopyAudio:  sc.Audio != nil && media.CanCopyAudio(sc.Audio, sc.Start, sc.AllowCopy),
 			})
 
+			// Флаги переподключения добавлены осознанно и в эталоне их нет:
+			// без них сеанс на файле без роя умирал сразу (см. args.go).
+			// Вырезаем их и сверяем ВСЁ остальное побайтово — гарантия
+			// на аргументы ffmpeg от этого не слабеет.
+			got = stripReconnectFlags(got)
+
 			if !equalArgs(got, golden[i].Args) {
 				t.Errorf("argv разошлись\nполучено: %s\nэталон:   %s",
 					strings.Join(got, " "), strings.Join(golden[i].Args, " "))
@@ -139,4 +145,41 @@ func indexOf(args []string, want string) int {
 		}
 	}
 	return -1
+}
+
+// stripReconnectFlags убирает наш префикс переподключения, чтобы остальные
+// аргументы можно было сверять с Node-эталоном как раньше.
+func stripReconnectFlags(args []string) []string {
+	skip := map[string]bool{
+		"-reconnect":                  true,
+		"-reconnect_streamed":         true,
+		"-reconnect_on_network_error": true,
+		"-reconnect_delay_max":        true,
+	}
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if skip[args[i]] {
+			i++ // пропускаем и значение флага
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return out
+}
+
+// TestReconnectFlagsArePresentAndBeforeInput — флаги входные, после -i
+// ffmpeg их проигнорирует молча, и защита исчезнет незаметно.
+func TestReconnectFlagsArePresentAndBeforeInput(t *testing.T) {
+	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", VideoIndex: 0})
+	iInput := indexOf(args, "-i")
+	for _, f := range []string{"-reconnect", "-reconnect_streamed", "-reconnect_on_network_error", "-reconnect_delay_max"} {
+		at := indexOf(args, f)
+		if at < 0 {
+			t.Errorf("нет флага %s — сеанс без роя снова будет умирать сразу", f)
+			continue
+		}
+		if at > iInput {
+			t.Errorf("%s стоит после -i: как входной флаг он будет проигнорирован", f)
+		}
+	}
 }
