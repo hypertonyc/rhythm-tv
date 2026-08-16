@@ -209,7 +209,12 @@
                 catch (e) { settle(new Error('Bad JSON from ' + path)); return; }
                 settle(null, parsed);
             } else {
-                settle(new Error('HTTP ' + xhr.status + ' for ' + path));
+                /* Код кладётся в саму ошибку: вызывающему бывает важно отличить
+                 * «сервер ответил, что не знает» от «до сервера не достучались».
+                 * См. confirmSessionLost — там на этом держится выход в меню. */
+                var httpErr = new Error('HTTP ' + xhr.status + ' for ' + path);
+                httpErr.status = xhr.status;
+                settle(httpErr);
             }
         };
         xhr.onerror = function () { settle(new Error('Network error: ' + url)); };
@@ -828,13 +833,46 @@
         el('hudClock').innerHTML = fmt(absoluteTime()) + ' / ' + fmt(total);
     }
 
+    /* Конец серии. Зовётся из onstreamcompleted и из oncurrentplaytime, когда
+     * прошивка это событие проглотила, поэтому обязана быть идемпотентной:
+     * playNextEpisode закрывает AVPlay и меняет meta, а stopPlayback уводит
+     * из плеера, так что повторный заход отсекается проверкой meta и mode. */
+    function streamCompleted() {
+        if (!meta || mode !== 'player') return;
+        clearPosition(meta.index);
+        if (autoNext && meta.next !== null) {
+            showHud('Episode finished. Starting next…');
+            playNextEpisode();
+        } else {
+            stopPlayback(true, 'Episode finished');
+        }
+    }
+
     function playerListener() {
         return {
             onbufferingstart: function () { showHud('Buffering…'); },
             onbufferingprogress: function (percent) { showHud('Buffering ' + percent + '%'); },
             onbufferingcomplete: function () { showHud('Playing'); },
             oncurrentplaytime: function (currentTime) {
-                lastPlayerTime = Number(currentTime) || 0;
+                var incoming = Number(currentTime) || 0;
+                /* Доиграв плейлист с EXT-X-ENDLIST, AVPlay на этой прошивке
+                 * не всегда зовёт onstreamcompleted: вместо этого он молча
+                 * заходит на плейлист заново и тянет seg00000 по кругу.
+                 * Снаружи это «первые пять секунд серии повторяются»,
+                 * и выйти оттуда можно только пультом.
+                 *
+                 * Отличаем по откату времени назад. Перемотка сюда не попадает:
+                 * она идёт через seekRelative с перезапуском сеанса (restarting),
+                 * а конец серии сторожится отдельно — откат засчитывается только
+                 * если до конца оставалось меньше полминуты. Иначе случайный
+                 * ноль на буферизации уводил бы на следующую серию с середины. */
+                if (!restarting && incoming + 60000 < lastPlayerTime &&
+                    durationSeconds() > 0 && durationSeconds() - absoluteTime() < 30) {
+                    lastPlayerTime = incoming;
+                    streamCompleted();
+                    return;
+                }
+                lastPlayerTime = incoming;
                 updateHudClock();
                 updateSubtitleOverlay();
                 var now = new Date().getTime();
@@ -848,16 +886,7 @@
                     apiIgnore('/api/probe/' + meta.next);
                 }
             },
-            onstreamcompleted: function () {
-                if (!meta) return;
-                clearPosition(meta.index);
-                if (autoNext && meta.next !== null) {
-                    showHud('Episode finished. Starting next…');
-                    playNextEpisode();
-                } else {
-                    stopPlayback(true, 'Episode finished');
-                }
-            },
+            onstreamcompleted: function () { streamCompleted(); },
             onevent: function () {},
             onerror: function (eventType) {
                 showHud('AVPlay error: ' + eventType);
@@ -1102,13 +1131,24 @@
      *
      * Ошибка ответа трактуется как «пока не знаем»: во время выкатки сервер
      * недоступен несколько секунд, и выходить в меню из-за этого незачем —
-     * погашенный сеанс никуда не денется и ответит stopped на следующем опросе
-     * (его каталог живёт ещё две минуты). */
+     * погашенный сеанс никуда не денется и ответит stopped на следующем опросе.
+     *
+     * Кроме 404. Две минуты живёт каталог сеанса, ЗАМЕНЁННОГО новым стартом,
+     * а /api/stop сносит его сразу же — и тогда hls-status отвечает 404
+     * навсегда. Пока 404 считался просто ошибкой, телевизор после остановки
+     * с телефона оставался в плеере насовсем: сегментов нет, выхода нет,
+     * помогает только Back на пульте. Сервер ответил — значит он жив
+     * и про наш сеанс не знает, а это ровно то же, что stopped. */
     function confirmSessionLost() {
         var id = currentSessionId;
         api('/api/hls-status/' + encodeURIComponent(id) + '?_=' + new Date().getTime(), function (err, s) {
-            if (err || !s) return;
             if (mode !== 'player' || currentSessionId !== id) return;
+            if (err && err.status === 404) {
+                stopPlayback(true, 'Playback was stopped on the server.');
+                checkLibrary();
+                return;
+            }
+            if (err || !s) return;
             if (s.state !== 'stopped' && s.state !== 'replaced' && s.state !== 'error') return;
             stopPlayback(true, 'Playback was stopped on the server.');
             checkLibrary();
