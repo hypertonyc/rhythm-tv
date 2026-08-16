@@ -77,6 +77,19 @@ func TestRequestsGoThroughProxyPrefix(t *testing.T) {
 	}
 }
 
+// TestUploadInputHasNoAccept — фильтр по типу файла ломает загрузку с iPhone.
+//
+// iOS сопоставляет accept с UTI, а для .torrent и application/x-bittorrent
+// их нет: Safari открывает «Файлы», где все файлы серые и выбрать нечего.
+// Поле при этом выглядит рабочим, поэтому симптом — «не нажимается»,
+// а не сообщение об ошибке. Фильтр здесь не нужен вовсе: метаинформацию
+// разбирает сервер, и мусор он отвергает с 400 до записи на диск.
+func TestUploadInputHasNoAccept(t *testing.T) {
+	if bytes.Contains(IndexHTML, []byte("accept=")) {
+		t.Error("на поле загрузки вернулся accept — с iPhone файл выбрать не получится")
+	}
+}
+
 // TestByteExact ловит самую вероятную поломку: редактор дописал \n в конец,
 // Content-Length разъехался с телом, и браузер получил обрезанную страницу.
 //

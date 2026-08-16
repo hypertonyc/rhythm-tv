@@ -58,9 +58,15 @@
     </div>
     <div id="libraryPanel" class="hidden">
       <div class="row">
-        <input id="torrentFile" type="file" accept=".torrent,application/x-bittorrent">
+        <!-- accept НЕ ставится сознательно. iOS сопоставляет его с UTI, а для
+             .torrent и application/x-bittorrent их нет: Safari показывает
+             «Файлы», где всё серое и выбрать нечего. Без accept выбирается
+             любой файл, а проверку всё равно делает сервер — он разбирает
+             метаинформацию до записи на диск. -->
+        <input id="torrentFile" type="file">
         <button id="uploadBtn">Upload</button>
       </div>
+      <div class="small">Any file works — the server checks that it is a real .torrent.</div>
       <div id="libraryStatus" class="small"></div>
       <div id="torrentList"></div>
     </div>
@@ -723,7 +729,9 @@
   function uploadTorrent() {
     var file = torrentFile.files && torrentFile.files[0];
     if (!file) {
-      setLibraryStatus('Pick a .torrent file first.', 'status-warn');
+      /* Ничего не выбрано — открываем выбор сами, вместо упрёка. */
+      setLibraryStatus('Pick a .torrent file.', 'status-warn');
+      torrentFile.click();
       return;
     }
     setLibraryStatus('Uploading ' + file.name + '…', 'status-warn');
