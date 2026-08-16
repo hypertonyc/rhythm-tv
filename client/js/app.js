@@ -771,6 +771,17 @@
         refreshMenu();
         setStatus('Reading audio/subtitle tracks…', 'warn');
         api('/api/probe/' + ep.index, function (err, data) {
+            /* Пока ответ ехал, пользователь мог уйти на другую серию. Ответ
+             * про прежнюю обязан быть выброшен: иначе meta.index разъедется
+             * с выбранной серией, refreshMenu уйдёт в ветку «…» — и останется
+             * там навсегда, потому что нового запроса никто уже не сделает.
+             * Ловится это только на разной длительности проб: пока разбор
+             * приходил из кэша мгновенно, обгонять было нечему. */
+            var still = currentEpisode();
+            if (!still || Number(still.index) !== Number(ep.index)) {
+                if (callback) callback(new Error('Episode changed'));
+                return;
+            }
             if (err) {
                 setStatus('Probe failed: ' + err.message, 'error');
                 if (callback) callback(err);
