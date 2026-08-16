@@ -1,0 +1,49 @@
+[
+  { "name": "transcode: video+audio, no subs, start 0",
+    "index": 3, "dir": "/tmp/tms-hls-abc", "start": 0, "allowCopy": true,
+    "meta": { "video": { "index": 0, "codec": "hevc", "width": 1920, "height": 1080, "pixFmt": "yuv420p10le", "profile": "Main 10", "level": 120, "fieldOrder": "progressive" } },
+    "audio": { "index": 1, "code": "rus", "codec": "ac3", "profile": "", "channels": 6, "sampleRate": 48000 },
+    "subtitle": null },
+
+  { "name": "copy/copy: source already in target format",
+    "index": 3, "dir": "/tmp/tms-hls-abc", "start": 0, "allowCopy": true,
+    "meta": { "video": { "index": 0, "codec": "h264", "width": 1920, "height": 1080, "pixFmt": "yuv420p", "profile": "High", "level": 40, "fieldOrder": "progressive" } },
+    "audio": { "index": 1, "code": "rus", "codec": "aac", "profile": "LC", "channels": 2, "sampleRate": 48000 },
+    "subtitle": null },
+
+  { "name": "seek forces transcode even for a copyable source",
+    "index": 3, "dir": "/tmp/tms-hls-abc", "start": 1234.5678, "allowCopy": true,
+    "meta": { "video": { "index": 0, "codec": "h264", "width": 1920, "height": 1080, "pixFmt": "yuv420p", "profile": "High", "level": 40, "fieldOrder": "progressive" } },
+    "audio": { "index": 1, "code": "rus", "codec": "aac", "profile": "LC", "channels": 2, "sampleRate": 48000 },
+    "subtitle": null },
+
+  { "name": "start just below the 0.05 threshold: no -ss at all",
+    "index": 3, "dir": "/tmp/tms-hls-abc", "start": 0.05, "allowCopy": true,
+    "meta": { "video": { "index": 0, "codec": "h264", "width": 1920, "height": 1080, "pixFmt": "yuv420p", "profile": "High", "level": 40, "fieldOrder": "progressive" } },
+    "audio": { "index": 1, "code": "rus", "codec": "aac", "profile": "LC", "channels": 2, "sampleRate": 48000 },
+    "subtitle": null },
+
+  { "name": "subtitles: -var_stream_map with disambiguation suffix stripped",
+    "index": 7, "dir": "/tmp/tms-hls-xyz", "start": 0, "allowCopy": false,
+    "meta": { "video": { "index": 0, "codec": "h264", "width": 1920, "height": 1080, "pixFmt": "yuv420p", "profile": "High", "level": 40, "fieldOrder": "progressive" } },
+    "audio": { "index": 2, "code": "rus-2", "codec": "aac", "profile": "LC", "channels": 2, "sampleRate": 48000 },
+    "subtitle": { "index": 5, "code": "eng-2" } },
+
+  { "name": "no audio track at all: -an, and no a:0 in var_stream_map",
+    "index": 0, "dir": "/tmp/tms-hls-noaud", "start": 0, "allowCopy": true,
+    "meta": { "video": { "index": 0, "codec": "h264", "width": 1920, "height": 1080, "pixFmt": "yuv420p", "profile": "High", "level": 40, "fieldOrder": "progressive" } },
+    "audio": null,
+    "subtitle": { "index": 3, "code": "rus" } },
+
+  { "name": "HLS_ALLOW_COPY=0 forces transcode of a copyable source",
+    "index": 3, "dir": "/tmp/tms-hls-abc", "start": 0, "allowCopy": false,
+    "meta": { "video": { "index": 0, "codec": "h264", "width": 1920, "height": 1080, "pixFmt": "yuv420p", "profile": "High", "level": 40, "fieldOrder": "progressive" } },
+    "audio": { "index": 1, "code": "rus", "codec": "aac", "profile": "LC", "channels": 2, "sampleRate": 48000 },
+    "subtitle": null },
+
+  { "name": "level -99 slips through the copy check (inherited Node bug)",
+    "index": 3, "dir": "/tmp/tms-hls-abc", "start": 0, "allowCopy": true,
+    "meta": { "video": { "index": 0, "codec": "h264", "width": 1920, "height": 1080, "pixFmt": "yuv420p", "profile": "High", "level": -99, "fieldOrder": "progressive" } },
+    "audio": { "index": 1, "code": "rus", "codec": "aac", "profile": "LC", "channels": 2, "sampleRate": 48000 },
+    "subtitle": null }
+]

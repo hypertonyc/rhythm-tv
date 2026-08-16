@@ -1,0 +1,520 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Torrent Media Server</title>
+<style>
+  body { margin:0; background:#101010; color:#eee; font-family:Arial,sans-serif; font-size:20px; }
+  .wrap { max-width:1100px; margin:0 auto; padding:22px; }
+  h1 { font-size:30px; margin:0 0 18px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:12px 0; }
+  select, button, input { font-size:20px; padding:10px 14px; background:#222; color:#fff; border:1px solid #555; border-radius:6px; }
+  button:focus, select:focus, input:focus { outline:3px solid #ddd; }
+  #episode { min-width:520px; max-width:100%; }
+  video { display:block; width:100%; height:auto; max-height:65vh; background:#000; margin-top:16px; object-fit:contain; }
+  video:fullscreen,
+  video:-webkit-full-screen,
+  video:-moz-full-screen {
+    width:100vw !important;
+    height:100vh !important;
+    max-width:none !important;
+    max-height:none !important;
+    margin:0 !important;
+    object-fit:contain !important;
+    background:#000 !important;
+  }
+  .grow { flex:1; }
+  .small { font-size:16px; color:#aaa; }
+  #seek { width:100%; box-sizing:border-box; }
+  #status { min-height:24px; color:#bbb; }
+  .statusbox { margin:14px 0; padding:14px 16px; background:#191919; border:1px solid #333; border-radius:8px; }
+  .statusline { margin:5px 0; }
+  .status-ok { color:#79d279; }
+  .status-warn { color:#ffd166; }
+  .status-bad { color:#ff7777; }
+  .status-muted { color:#aaa; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 id="title">Torrent Media Server</h1>
+
+  <div class="row">
+    <button id="prev">◀ Previous</button>
+    <select id="episode" class="grow"></select>
+    <button id="next">Next ▶</button>
+  </div>
+
+  <div class="row">
+    <label>Audio <select id="audio"></select></label>
+    <label>Subtitles <select id="sub"><option value="off">Off</option></select></label>
+    <label><input id="autonext" type="checkbox"> Auto next</label>
+    <button id="play">▶ Play</button>
+  </div>
+
+  <div class="statusbox">
+    <div class="statusline"><strong>Status:</strong> <span id="humanStatus">Starting server status…</span></div>
+    <div class="statusline small" id="torrentStatus">Torrent: checking…</div>
+    <div class="statusline small" id="playerStatus">Player: idle</div>
+  </div>
+
+  <video id="video" controls playsinline></video>
+
+  <div class="row">
+    <button id="back30">−30s</button>
+    <input id="seek" class="grow" type="range" min="0" max="1" step="1" value="0">
+    <button id="forward30">+30s</button>
+  </div>
+  <div class="row small">
+    <span id="clock">00:00 / 00:00</span>
+    <span id="status" class="grow"></span>
+  </div>
+</div>
+<script>
+(function () {
+  var episodes = [];
+  var meta = null;
+  var currentIndex = null;
+  var startOffset = 0;
+  var saveTimer = 0;
+  var prebufferedFor = null;
+  var isPlaying = false;
+
+  var episode = document.getElementById('episode');
+  var audio = document.getElementById('audio');
+  var sub = document.getElementById('sub');
+  var autonext = document.getElementById('autonext');
+  var video = document.getElementById('video');
+  var seek = document.getElementById('seek');
+  var clock = document.getElementById('clock');
+  var status = document.getElementById('status');
+  var humanStatus = document.getElementById('humanStatus');
+  var torrentStatus = document.getElementById('torrentStatus');
+  var playerStatus = document.getElementById('playerStatus');
+  var lastServerStatus = null;
+  var browserState = 'idle';
+
+  function setFullscreenSizing(on) {
+    if (on) {
+      video.style.width = '100vw';
+      video.style.height = '100vh';
+      video.style.maxWidth = 'none';
+      video.style.maxHeight = 'none';
+      video.style.margin = '0';
+      video.style.objectFit = 'contain';
+    } else {
+      video.style.width = '100%';
+      video.style.height = 'auto';
+      video.style.maxWidth = '';
+      video.style.maxHeight = '65vh';
+      video.style.margin = '16px 0 0';
+      video.style.objectFit = 'contain';
+    }
+  }
+
+  function syncFullscreenSizing() {
+    var fs = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+    setFullscreenSizing(fs === video || !!document.webkitIsFullScreen || !!document.mozFullScreen);
+  }
+
+  if (document.addEventListener) {
+    document.addEventListener('fullscreenchange', syncFullscreenSizing, false);
+    document.addEventListener('webkitfullscreenchange', syncFullscreenSizing, false);
+    document.addEventListener('mozfullscreenchange', syncFullscreenSizing, false);
+  }
+  video.addEventListener('webkitbeginfullscreen', function () { setFullscreenSizing(true); }, false);
+  video.addEventListener('webkitendfullscreen', function () { setFullscreenSizing(false); }, false);
+
+  function get(key, fallback) {
+    try {
+      var v = localStorage.getItem(key);
+      return v === null ? fallback : v;
+    } catch (e) { return fallback; }
+  }
+
+  function set(key, value) {
+    try { localStorage.setItem(key, String(value)); } catch (e) {}
+  }
+
+  function positions() {
+    try { return JSON.parse(get('tms.positions', '{}')) || {}; }
+    catch (e) { return {}; }
+  }
+
+  function savePosition(value) {
+    if (currentIndex === null) return;
+    var p = positions();
+    p[String(currentIndex)] = Math.max(0, Math.floor(value));
+    try { localStorage.setItem('tms.positions', JSON.stringify(p)); } catch (e) {}
+  }
+
+  function clearPosition(index) {
+    var p = positions();
+    delete p[String(index)];
+    try { localStorage.setItem('tms.positions', JSON.stringify(p)); } catch (e) {}
+  }
+
+  function xhrJson(url, callback) {
+    var x = new XMLHttpRequest();
+    x.open('GET', url, true);
+    x.onreadystatechange = function () {
+      if (x.readyState !== 4) return;
+      if (x.status >= 200 && x.status < 300) {
+        try { callback(null, JSON.parse(x.responseText)); }
+        catch (e) { callback(e); }
+      } else callback(new Error('HTTP ' + x.status));
+    };
+    x.send();
+  }
+
+  function ping(url) {
+    var x = new XMLHttpRequest();
+    x.open('GET', url, true);
+    x.send();
+  }
+
+  function fmt(seconds) {
+    seconds = Math.max(0, Math.floor(seconds || 0));
+    var h = Math.floor(seconds / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    var s = seconds % 60;
+    if (h) return h + ':' + (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function fmtBytes(bytes) {
+    bytes = Number(bytes || 0);
+    if (bytes < 1024) return Math.round(bytes) + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+    return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+
+  function fmtSpeed(bytes) {
+    return fmtBytes(bytes) + '/s';
+  }
+
+  function setHumanStatus(text, cls) {
+    humanStatus.textContent = text;
+    humanStatus.className = cls || '';
+  }
+
+  function refreshHumanStatus() {
+    var s = lastServerStatus;
+    if (!s || !s.ready) {
+      setHumanStatus('Loading torrent metadata…', 'status-warn');
+      return;
+    }
+    if (s.playback && s.playback.state === 'error') {
+      setHumanStatus('Playback failed — ffmpeg returned an error.', 'status-bad');
+      return;
+    }
+    if (browserState === 'error') {
+      setHumanStatus('Browser could not play the stream.', 'status-bad');
+      return;
+    }
+    if (s.peers === 0) {
+      setHumanStatus('No torrent peers yet — waiting for sources.', 'status-warn');
+      return;
+    }
+    if (browserState === 'playing') {
+      setHumanStatus('Playing normally.', 'status-ok');
+      return;
+    }
+    if (browserState === 'waiting' || browserState === 'stalled') {
+      if (s.downloadSpeed > 0) setHumanStatus('Buffering — torrent data is arriving, please wait.', 'status-warn');
+      else setHumanStatus('Buffering — connected to peers, but no data is arriving right now.', 'status-warn');
+      return;
+    }
+    if (s.playback && (s.playback.state === 'preparing' || s.playback.state === 'buffering')) {
+      if (s.downloadSpeed > 0) setHumanStatus('Preparing Samsung-compatible HLS — generating startup segments…', 'status-warn');
+      else setHumanStatus('Preparing HLS — waiting for required torrent pieces…', 'status-warn');
+      return;
+    }
+    if (s.playback && (s.playback.state === 'ready' || s.playback.state === 'finished') && s.playback.bytesOut > 0) {
+      setHumanStatus('HLS segments are ready; browser is opening the native TV stream.', 'status-warn');
+      return;
+    }
+    if (isPlaying) {
+      setHumanStatus('Starting playback…', 'status-warn');
+      return;
+    }
+    setHumanStatus('Ready.', 'status-ok');
+  }
+
+  function pollServerStatus() {
+    xhrJson('/api/status?_=' + Date.now(), function (err, s) {
+      if (err) {
+        torrentStatus.textContent = 'Torrent: status request failed: ' + err.message;
+        torrentStatus.className = 'statusline small status-bad';
+        setHumanStatus('Cannot reach the media server.', 'status-bad');
+        return;
+      }
+      lastServerStatus = s;
+      if (!s.ready) {
+        torrentStatus.textContent = 'Torrent: loading metadata…';
+        torrentStatus.className = 'statusline small status-warn';
+      } else {
+        torrentStatus.textContent = 'Torrent: ' + s.peers + ' peers · ' + fmtSpeed(s.downloadSpeed) + ' · ' + fmtBytes(s.downloaded) + ' received · total torrent ' + (Number(s.progress || 0) * 100).toFixed(2) + '%';
+        torrentStatus.className = 'statusline small ' + (s.peers > 0 ? 'status-ok' : 'status-warn');
+      }
+      if (!s.playback) {
+        playerStatus.textContent = 'Player: idle';
+        playerStatus.className = 'statusline small status-muted';
+      } else {
+        var pb = s.playback;
+        var age = Math.max(0, Math.floor((Date.now() - pb.startedAt) / 1000));
+        var extra = pb.bytesOut ? ' · ' + fmtBytes(pb.bytesOut) + ' produced · ' + (pb.segments || 0) + ' HLS segments' : '';
+        if (typeof pb.downloadedSinceStart === 'number') extra += ' · ' + fmtBytes(pb.downloadedSinceStart) + ' downloaded for this playback';
+        if (pb.lastOutputAt) extra += ' · last output ' + Math.max(0, Math.floor((Date.now() - pb.lastOutputAt) / 1000)) + 's ago';
+        playerStatus.textContent = 'Player: ' + pb.state + ' · episode [' + pb.index + '] · audio=' + pb.audio + ' · subtitles=' + pb.sub +
+          ' · video ' + (pb.videoMode || '?') + '/audio ' + (pb.audioMode || '?') + ' · ' + age + 's' + extra;
+        playerStatus.className = 'statusline small ' + (pb.state === 'error' ? 'status-bad' : ((pb.state === 'ready' || pb.state === 'finished') ? 'status-ok' : 'status-warn'));
+      }
+      refreshHumanStatus();
+    });
+  }
+
+  function absoluteTime() {
+    return startOffset + (isFinite(video.currentTime) ? video.currentTime : 0);
+  }
+
+  function option(select, value, label) {
+    var o = document.createElement('option');
+    o.value = value;
+    o.textContent = label;
+    select.appendChild(o);
+  }
+
+  function pickValue(select, preferred) {
+    var i;
+    for (i = 0; i < select.options.length; i++) {
+      if (select.options[i].value === preferred) {
+        select.selectedIndex = i;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function populateTracks() {
+    var preferredAudio = get('tms.audio', 'rus');
+    var preferredSub = get('tms.sub', 'off');
+    var i;
+
+    audio.innerHTML = '';
+    for (i = 0; i < meta.audio.length; i++) {
+      option(audio, meta.audio[i].code, meta.audio[i].label + (meta.audio[i].codec ? ' (' + meta.audio[i].codec + ')' : ''));
+    }
+    if (!pickValue(audio, preferredAudio) && audio.options.length) audio.selectedIndex = 0;
+
+    sub.innerHTML = '';
+    option(sub, 'off', 'Off');
+    for (i = 0; i < meta.subtitles.length; i++) {
+      option(sub, meta.subtitles[i].code, meta.subtitles[i].label + (meta.subtitles[i].codec ? ' (' + meta.subtitles[i].codec + ')' : ''));
+    }
+    if (!pickValue(sub, preferredSub)) sub.value = 'off';
+  }
+
+  function updateClock() {
+    var now = absoluteTime();
+    var total = meta ? meta.duration : 0;
+    clock.textContent = fmt(now) + ' / ' + fmt(total);
+    if (total > 0) {
+      seek.max = Math.max(1, Math.floor(total));
+      if (!seek.matches || !seek.matches(':active')) seek.value = Math.min(total, now);
+    }
+
+    if (meta && meta.next !== null && total > 0 && total - now < 90 && prebufferedFor !== meta.next) {
+      prebufferedFor = meta.next;
+      ping('/api/prebuffer/' + meta.next);
+      // Also probe the next episode so language matching is ready.
+      ping('/api/probe/' + meta.next);
+    }
+  }
+
+  function waitForHls(sessionId, playlist, automatic) {
+    xhrJson('/api/hls-status/' + encodeURIComponent(sessionId) + '?_=' + Date.now(), function (err, s) {
+      if (err) {
+        status.textContent = 'HLS status failed: ' + err.message;
+        browserState = 'error';
+        refreshHumanStatus();
+        return;
+      }
+      if (s.state === 'error') {
+        status.textContent = 'HLS preparation failed.';
+        browserState = 'error';
+        refreshHumanStatus();
+        return;
+      }
+      // Сеанс остановлен или заменён более новым /api/start: его сегменты ещё
+      // лежат на диске, но открывать их нельзя. Молча выходим — экраном
+      // распоряжается тот опрос, который заменил этот.
+      if (s.state === 'stopped' || s.state === 'replaced') return;
+      if (s.segments >= 2 || s.state === 'finished') {
+        status.textContent = 'Opening Samsung-compatible HLS stream…';
+        browserState = 'loading';
+        video.src = playlist + '?_=' + Date.now();
+        video.load();
+        isPlaying = true;
+        var p = video.play();
+        if (p && p.catch) p.catch(function () {
+          if (automatic) status.textContent = 'Press Play on the remote to continue.';
+        });
+        return;
+      }
+      status.textContent = 'Preparing HLS: ' + (s.segments || 0) + '/2 startup segments…';
+      browserState = 'waiting';
+      refreshHumanStatus();
+      setTimeout(function () { waitForHls(sessionId, playlist, automatic); }, 700);
+    });
+  }
+
+  function playFrom(seconds, automatic) {
+    if (!meta) return;
+    seconds = Math.max(0, Math.min(seconds || 0, Math.max(0, meta.duration - 1)));
+    startOffset = seconds;
+    prebufferedFor = null;
+    set('tms.autonext', autonext.checked ? '1' : '0');
+
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    status.textContent = 'Starting Samsung-compatible HLS…';
+    browserState = 'starting';
+    refreshHumanStatus();
+
+    var startUrl = '/api/start/' + currentIndex + '?audio=' + encodeURIComponent(audio.value || '') +
+      '&sub=' + encodeURIComponent(sub.value || 'off') + '&start=' + encodeURIComponent(seconds.toFixed(3)) + '&_=' + Date.now();
+    xhrJson(startUrl, function (err, data) {
+      if (err) {
+        status.textContent = 'Cannot start HLS: ' + err.message;
+        browserState = 'error';
+        refreshHumanStatus();
+        return;
+      }
+      waitForHls(data.id, data.playlist, automatic);
+    });
+  }
+
+  function loadEpisode(index, automatic) {
+    index = Number(index);
+    currentIndex = index;
+    set('tms.lastEpisode', index);
+    episode.value = String(index);
+    status.textContent = 'Reading tracks...';
+    browserState = 'probing';
+    refreshHumanStatus();
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    isPlaying = false;
+
+    xhrJson('/api/probe/' + index, function (err, data) {
+      if (err) {
+        status.textContent = 'Probe failed: ' + err.message;
+        return;
+      }
+      meta = data;
+      document.getElementById('title').textContent = data.name;
+      populateTracks();
+      var saved = Number(positions()[String(index)] || 0);
+      if (saved > 10 && (!data.duration || saved < data.duration - 30)) startOffset = saved;
+      else startOffset = 0;
+      seek.max = Math.max(1, Math.floor(data.duration || 1));
+      seek.value = Math.floor(startOffset);
+      updateClock();
+      status.textContent = 'Ready';
+      browserState = 'idle';
+      refreshHumanStatus();
+      if (automatic) playFrom(0, true);
+    });
+  }
+
+  function goNext(automatic) {
+    if (!meta || meta.next === null) return;
+    clearPosition(currentIndex);
+    loadEpisode(meta.next, automatic);
+  }
+
+  function goPrev() {
+    if (!meta || meta.prev === null) return;
+    loadEpisode(meta.prev, false);
+  }
+
+  episode.onchange = function () { loadEpisode(Number(episode.value), false); };
+  document.getElementById('prev').onclick = goPrev;
+  document.getElementById('next').onclick = function () { goNext(false); };
+  document.getElementById('play').onclick = function () { playFrom(startOffset || Number(seek.value) || 0, false); };
+
+  audio.onchange = function () {
+    set('tms.audio', audio.value);
+    if (isPlaying) playFrom(absoluteTime(), false);
+  };
+
+  sub.onchange = function () {
+    set('tms.sub', sub.value);
+    if (isPlaying) playFrom(absoluteTime(), false);
+  };
+
+  autonext.onchange = function () { set('tms.autonext', autonext.checked ? '1' : '0'); };
+
+  document.getElementById('back30').onclick = function () { playFrom(Math.max(0, absoluteTime() - 30), false); };
+  document.getElementById('forward30').onclick = function () { playFrom(Math.min(meta ? meta.duration - 1 : 0, absoluteTime() + 30), false); };
+
+  seek.onchange = function () { playFrom(Number(seek.value) || 0, false); };
+
+  video.addEventListener('loadstart', function () { browserState = 'loading'; status.textContent = 'Loading stream…'; refreshHumanStatus(); });
+  video.addEventListener('loadedmetadata', function () { browserState = 'metadata'; status.textContent = 'Video metadata received…'; refreshHumanStatus(); });
+  video.addEventListener('canplay', function () { browserState = 'canplay'; status.textContent = 'Enough data to start…'; refreshHumanStatus(); });
+  video.addEventListener('playing', function () { status.textContent = ''; isPlaying = true; browserState = 'playing'; refreshHumanStatus(); });
+  video.addEventListener('waiting', function () { status.textContent = 'Buffering…'; browserState = 'waiting'; refreshHumanStatus(); });
+  video.addEventListener('stalled', function () { status.textContent = 'Stream stalled…'; browserState = 'stalled'; refreshHumanStatus(); });
+  video.addEventListener('pause', function () { if (!video.ended && browserState === 'playing') { browserState = 'paused'; refreshHumanStatus(); } });
+  video.addEventListener('error', function () {
+    var code = video.error ? video.error.code : 0;
+    status.textContent = 'Playback error' + (code ? ' (code ' + code + ')' : '') + '.';
+    browserState = 'error';
+    refreshHumanStatus();
+  });
+  video.addEventListener('timeupdate', function () {
+    updateClock();
+    var now = absoluteTime();
+    var t = Date.now();
+    if (t - saveTimer > 5000) {
+      saveTimer = t;
+      savePosition(now);
+    }
+  });
+  video.addEventListener('ended', function () {
+    isPlaying = false;
+    browserState = 'ended';
+    clearPosition(currentIndex);
+    if (autonext.checked && meta && meta.next !== null) goNext(true);
+    else status.textContent = 'Episode finished';
+  });
+
+  autonext.checked = get('tms.autonext', '1') !== '0';
+  pollServerStatus();
+  setInterval(pollServerStatus, 1000);
+
+  xhrJson('/api/files', function (err, data) {
+    if (err) {
+      status.textContent = 'Cannot load file list: ' + err.message;
+      return;
+    }
+    episodes = data.files;
+    document.getElementById('title').textContent = data.torrent;
+    episode.innerHTML = '';
+    for (var i = 0; i < episodes.length; i++) option(episode, String(episodes[i].index), episodes[i].name);
+    var last = Number(get('tms.lastEpisode', episodes.length ? episodes[0].index : 0));
+    var exists = false;
+    for (var j = 0; j < episodes.length; j++) if (episodes[j].index === last) exists = true;
+    if (!exists && episodes.length) last = episodes[0].index;
+    if (episodes.length) loadEpisode(last, false);
+  });
+})();
+</script>
+</body>
+</html>
