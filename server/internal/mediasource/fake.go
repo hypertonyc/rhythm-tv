@@ -40,10 +40,12 @@ func NewFake(name string, paths ...string) (*Fake, error) {
 			return nil, err
 		}
 		f.files = append(f.files, File{
-			Index:  i,
-			Name:   filepath.Base(p),
-			Path:   filepath.ToSlash(p),
-			Length: st.Size(),
+			Index: i,
+			Name:  filepath.Base(p),
+			Path:  filepath.ToSlash(p),
+			// Как у настоящего источника: имя раздачи плюс имя файла.
+			StorePath: name + "/" + filepath.Base(p),
+			Length:    st.Size(),
 		})
 	}
 	return f, nil

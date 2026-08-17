@@ -17,6 +17,7 @@ import (
 	"github.com/avdav/torrent-media/server/internal/library"
 	"github.com/avdav/torrent-media/server/internal/media"
 	"github.com/avdav/torrent-media/server/internal/mediasource"
+	"github.com/avdav/torrent-media/server/internal/reclaim"
 	"github.com/avdav/torrent-media/server/internal/subs"
 )
 
@@ -67,6 +68,18 @@ type Sessions interface {
 	SessionDir(id string) (string, bool)
 }
 
+// Disk — место под скачанное глазами HTTP-слоя; это *reclaim.Keeper.
+//
+// Две несвязанные на вид вещи в одном интерфейсе потому, что источник у них
+// один: чистка помнит, когда серию смотрели в последний раз, и она же знает,
+// сколько на диске осталось. nil означает «чистки нет», и тогда ни отметок,
+// ни поля storage в /api/torrents не появляется.
+type Disk interface {
+	// Touch отмечает, что файл сейчас смотрят; путь — относительно хранилища.
+	Touch(rel string)
+	Snapshot() reclaim.Snapshot
+}
+
 // Deps — всё, что нужно обработчикам.
 type Deps struct {
 	// Library владеет активным источником; обработчики спрашивают его один раз
@@ -78,6 +91,8 @@ type Deps struct {
 	// Subs — субтитры, лежащие отдельными файлами рядом с сервером. nil
 	// означает «каталога нет», и тогда всё работает как раньше.
 	Subs *subs.Library
+	// Disk — чистка места; nil выключает и отметки просмотра, и поле storage.
+	Disk Disk
 	// BaseCtx живёт столько же, сколько процесс. Нужен префетчу: контекст
 	// запроса там не годится (см. handlePrebuffer).
 	BaseCtx context.Context
@@ -329,6 +344,11 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request, rawIndex st
 		errorJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Отметка о просмотре ставится здесь и больше нигде: запуск сеанса —
+	// единственное место, где сервер точно знает, что серию СМОТРЯТ.
+	// По этим отметкам чистка решает, чем жертвовать, когда кончится место.
+	// Перемотка ставит её заново, и это правильно: серия всё ещё идёт.
+	s.markWatched(src, index)
 	writeJSON(w, http.StatusOK, snap)
 }
 
@@ -348,6 +368,22 @@ func (s *Server) handlePrebuffer(w http.ResponseWriter, rawIndex string) {
 	writeJSON(w, http.StatusOK, struct {
 		OK bool `json:"ok"`
 	}{true})
+}
+
+// markWatched отмечает серию просмотренной в журнале чистки.
+//
+// Ключ — путь файла в хранилище, а не индекс: индекс принадлежит торренту,
+// и после переключения активного он означает уже другой файл, а выселяется
+// файл на диске.
+func (s *Server) markWatched(src mediasource.Source, index int) {
+	if s.deps.Disk == nil {
+		return
+	}
+	file, ok := s.file(src, index)
+	if !ok || file.StorePath == "" {
+		return
+	}
+	s.deps.Disk.Touch(file.StorePath)
 }
 
 // currentSource — источник без проверки готовности, для /raw.

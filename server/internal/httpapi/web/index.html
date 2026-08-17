@@ -68,6 +68,7 @@
       </div>
       <div class="small">Any file works — the server checks that it is a real .torrent.</div>
       <div id="libraryStatus" class="small"></div>
+      <div id="libraryStorage" class="small"></div>
       <div id="torrentList"></div>
     </div>
   </div>
@@ -128,6 +129,7 @@
   var browserState = 'idle';
   var libraryPanel = document.getElementById('libraryPanel');
   var libraryStatus = document.getElementById('libraryStatus');
+  var libraryStorage = document.getElementById('libraryStorage');
   var libraryActive = document.getElementById('libraryActive');
   var torrentList = document.getElementById('torrentList');
   var torrentFile = document.getElementById('torrentFile');
@@ -662,9 +664,31 @@
     return row;
   }
 
+  /* Место под скачанное. Сервер сам выселяет старое, когда его становится
+     мало, — строка нужна затем, чтобы «серия куда-то делась» имела видимое
+     объяснение, а порог не приходилось выяснять по логам. */
+  function renderStorage(storage) {
+    if (!storage) {
+      libraryStorage.textContent = '';
+      return;
+    }
+    /* -1 означает «не смогли измерить»: ноль был бы законным показанием. */
+    var parts = [storage.free < 0 ? 'Free space unknown' : 'Free ' + fmtBytes(storage.free)];
+    parts.push(storage.minFree > 0
+      ? 'cleanup below ' + fmtBytes(storage.minFree)
+      : 'auto-cleanup off');
+    if (storage.evicted > 0) {
+      parts.push('reclaimed ' + storage.evicted + ' file(s), ' + fmtBytes(storage.evictedBytes));
+    }
+    libraryStorage.textContent = parts.join(' · ');
+    libraryStorage.className = 'small ' +
+      (storage.minFree > 0 && storage.free >= 0 && storage.free < storage.minFree ? 'status-warn' : '');
+  }
+
   function renderTorrents(data) {
     var list = (data && data.torrents) || [];
     var active = null;
+    renderStorage(data && data.storage);
     torrentList.innerHTML = '';
     for (var i = 0; i < list.length; i++) {
       if (list[i].active) active = list[i];

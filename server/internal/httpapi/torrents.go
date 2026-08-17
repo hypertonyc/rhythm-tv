@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/avdav/torrent-media/server/internal/library"
+	"github.com/avdav/torrent-media/server/internal/reclaim"
 )
 
 // Ручки библиотеки торрентов.
@@ -141,10 +142,20 @@ func (s *Server) writeLibrary(w http.ResponseWriter, status int) {
 		active = &id
 	}
 
+	// Место под скачанное едет ЗДЕСЬ, а не в /api/status: тот сверяется
+	// с Node-эталоном побайтово, и лишнее поле сломало бы сверку. Заодно это
+	// и есть нужное место: диск занимают торренты, а управляют ими отсюда.
+	var storage *reclaim.Snapshot
+	if s.deps.Disk != nil {
+		snap := s.deps.Disk.Snapshot()
+		storage = &snap
+	}
+
 	writeJSON(w, status, struct {
-		Active   *string         `json:"active"`
-		Torrents []library.Entry `json:"torrents"`
-	}{Active: active, Torrents: entries})
+		Active   *string           `json:"active"`
+		Torrents []library.Entry   `json:"torrents"`
+		Storage  *reclaim.Snapshot `json:"storage"`
+	}{Active: active, Torrents: entries, Storage: storage})
 }
 
 // uploadBody достаёт содержимое .torrent из запроса.

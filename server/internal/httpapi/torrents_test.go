@@ -6,12 +6,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/avdav/torrent-media/server/internal/hls"
 	"github.com/avdav/torrent-media/server/internal/library"
 	"github.com/avdav/torrent-media/server/internal/mediasource"
+	"github.com/avdav/torrent-media/server/internal/reclaim"
 )
 
 // fakeLibrary и fakeSessions пишут вызовы в общий журнал calls: половина
@@ -201,8 +204,8 @@ func TestTorrentsList(t *testing.T) {
 		t.Fatalf("код %d", rec.Code)
 	}
 	// Пустой список — [], а не null: клиент читает .length без проверки.
-	// active — именно null, а не отсутствующий ключ.
-	if got := rec.Body.String(); got != `{"active":null,"torrents":[]}` {
+	// active и storage — именно null, а не отсутствующие ключи.
+	if got := rec.Body.String(); got != `{"active":null,"torrents":[],"storage":null}` {
 		t.Errorf("тело %q", got)
 	}
 
@@ -212,7 +215,7 @@ func TestTorrentsList(t *testing.T) {
 	}}, id)
 	rec = do(s, http.MethodGet, "/api/torrents", nil)
 	want := `{"active":"` + id + `","torrents":[{"id":"` + id +
-		`","name":"Сериал","file":"Сериал.torrent","length":42,"files":2,"addedAt":1700000000000,"active":true}]}`
+		`","name":"Сериал","file":"Сериал.torrent","length":42,"files":2,"addedAt":1700000000000,"active":true}],"storage":null}`
 	if got := rec.Body.String(); got != want {
 		t.Errorf("тело\n  %q\nожидалось\n  %q", got, want)
 	}
@@ -403,5 +406,75 @@ func TestTorrentRoutesAreStrict(t *testing.T) {
 		if len(*calls) != 0 {
 			t.Errorf("POST %s что-то сделал: %v", path, *calls)
 		}
+	}
+}
+
+// fakeDisk — чистка места глазами обработчиков.
+type fakeDisk struct {
+	touched []string
+	snap    reclaim.Snapshot
+}
+
+func (d *fakeDisk) Touch(rel string)           { d.touched = append(d.touched, rel) }
+func (d *fakeDisk) Snapshot() reclaim.Snapshot { return d.snap }
+
+// TestMarkWatchedUsesStorePath — отметка о просмотре кладётся под путём файла
+// В ХРАНИЛИЩЕ, а не под индексом и не под именем.
+//
+// Индекс принадлежит торренту: после переключения активного тот же номер
+// означает другую серию, и чистка выселяла бы по чужой истории. Имя без
+// каталога тоже не годится — в паках, где сезон вынесен в каталог, все серии
+// называются одинаково.
+func TestMarkWatchedUsesStorePath(t *testing.T) {
+	dir := t.TempDir()
+	paths := make([]string, 0, 2)
+	for _, name := range []string{"s01e01.mkv", "s01e02.mkv"} {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("серия"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	src, err := mediasource.NewFake("Друзья", paths...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	disk := &fakeDisk{}
+	calls := make([]string, 0)
+	s := New(Deps{Library: &fakeLibrary{calls: &calls, current: src}, HLS: &fakeSessions{calls: &calls}, Disk: disk})
+
+	s.markWatched(src, 1)
+	if len(disk.touched) != 1 || disk.touched[0] != "Друзья/s01e02.mkv" {
+		t.Fatalf("отмечено %v, ожидался путь в хранилище", disk.touched)
+	}
+
+	// Несуществующая серия отметки не оставляет.
+	s.markWatched(src, 7)
+	if len(disk.touched) != 1 {
+		t.Errorf("отмечено %v после запроса несуществующего файла", disk.touched)
+	}
+
+	// Без чистки обработчик просто ничего не делает.
+	plain := New(Deps{Library: &fakeLibrary{calls: &calls, current: src}, HLS: &fakeSessions{calls: &calls}})
+	plain.markWatched(src, 0)
+}
+
+// TestTorrentsListReportsStorage — место под скачанное видно на странице
+// библиотеки. Именно здесь, а не в /api/status: тот сверяется с Node-эталоном
+// побайтово, и лишнее поле сломало бы сверку.
+func TestTorrentsListReportsStorage(t *testing.T) {
+	calls := make([]string, 0)
+	at := int64(1755400000000)
+	disk := &fakeDisk{snap: reclaim.Snapshot{
+		Free: 19 << 30, MinFree: 10 << 30, Evicted: 3, EvictedBytes: 2 << 30, LastEvictedAt: &at,
+	}}
+	s := New(Deps{Library: &fakeLibrary{calls: &calls}, HLS: &fakeSessions{calls: &calls}, Disk: disk})
+
+	rec := do(s, http.MethodGet, "/api/torrents", nil)
+	want := `{"active":null,"torrents":[],"storage":{"free":20401094656,"minFree":10737418240,` +
+		`"evicted":3,"evictedBytes":2147483648,"lastEvictedAt":1755400000000}}`
+	if got := rec.Body.String(); got != want {
+		t.Errorf("тело\n  %q\nожидалось\n  %q", got, want)
 	}
 }

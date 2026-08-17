@@ -419,3 +419,94 @@ func TestFileNameFor(t *testing.T) {
 		}
 	}
 }
+
+// packBytes собирает .torrent на КАТАЛОГ из нескольких файлов — так приезжает
+// сериал. Одиночный файл (torrentBytes выше) раскладывается на диске иначе,
+// и оба случая нужны: у пака путь это «имя раздачи/путь внутри», а у одиночного
+// имя раздачи и есть весь путь.
+func packBytes(t *testing.T, dirName string, names ...string) []byte {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), dirName)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i, name := range names {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Разной длины, чтобы перепутанные файлы было видно по размеру.
+		if err := os.WriteFile(path, bytes.Repeat([]byte{byte('a' + i)}, 100*(i+1)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info := metainfo.Info{PieceLength: 1 << 14}
+	if err := info.BuildFromFilePath(root); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := bencode.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := (&metainfo.MetaInfo{InfoBytes: raw}).Write(&buf); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestStoredFilesCoversWholeLibrary — чистка выселяет по этому списку, поэтому
+// в нём обязаны быть файлы ВСЕХ торрентов, а не только активного: место
+// занимают все, а в клиенте лежит один.
+func TestStoredFilesCoversWholeLibrary(t *testing.T) {
+	dir := t.TempDir()
+	open, _ := opener(t)
+	lib := New(dir, t.TempDir(), open)
+
+	pack, err := lib.Add(bytes.NewReader(packBytes(t, "Сериал", "Сезон 01/s01e01.mkv", "Сезон 01/s01e02.mkv")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	single, err := lib.Add(bytes.NewReader(torrentBytes(t, "фильм.mkv", []byte("одиночный файл"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Activate(pack.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := lib.StoredFiles()
+	if err != nil {
+		t.Fatalf("StoredFiles: %v", err)
+	}
+
+	got := make(map[string]StoredFile, len(files))
+	for _, f := range files {
+		got[f.Rel] = f
+	}
+	// Путь у пака — с именем раздачи впереди, у одиночного файла имя раздачи
+	// и есть весь путь. Удвоение («фильм.mkv/фильм.mkv») означало бы, что
+	// чистка ищет файл не там, где он лежит, и не выселит ничего.
+	want := []string{"Сериал/Сезон 01/s01e01.mkv", "Сериал/Сезон 01/s01e02.mkv", "фильм.mkv"}
+	if len(files) != len(want) {
+		t.Fatalf("файлов %d, ожидалось %d: %v", len(files), len(want), got)
+	}
+	for _, rel := range want {
+		f, ok := got[rel]
+		if !ok {
+			t.Fatalf("файла %q в списке нет: %v", rel, got)
+		}
+		if f.Length <= 0 {
+			t.Errorf("%q: длина %d", rel, f.Length)
+		}
+		if _, err := os.Stat(f.TorrentFile); err != nil {
+			t.Errorf("%q: .torrent не найден: %v", rel, err)
+		}
+	}
+	if !got["Сериал/Сезон 01/s01e01.mkv"].Active {
+		t.Error("файл активного торрента не помечен активным")
+	}
+	if got["фильм.mkv"].Active || got["фильм.mkv"].TorrentID != single.ID {
+		t.Error("файл неактивного торрента приписан не тому торренту")
+	}
+}

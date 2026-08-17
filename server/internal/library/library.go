@@ -93,10 +93,16 @@ type Library struct {
 // cached — разобранная метаинформация одного файла. Ключ кэша — путь,
 // признак свежести — mtime и размер: список опрашивается страницей раз
 // в секунду, а разбор торрента на 27 ГБ это сотни килобайт хэшей.
+//
+// info хранится целиком, а не только сведённая в Entry сводка: по нему
+// чистка места (internal/reclaim) узнаёт, где лежат файлы торрента и какие
+// куски их покрывают. Это те же сотни килобайт хэшей на торрент — дешевле,
+// чем разбирать .torrent заново на каждом проходе чистки.
 type cached struct {
 	modTime int64
 	size    int64
 	entry   Entry
+	info    *metainfo.Info
 }
 
 // New собирает библиотеку над каталогом dir.
@@ -172,34 +178,107 @@ func (l *Library) listLocked() ([]Entry, error) {
 
 // entryFor разбирает один .torrent, используя кэш.
 func (l *Library) entryFor(path string) (Entry, error) {
-	st, err := os.Stat(path)
+	c, err := l.parse(path)
 	if err != nil {
 		return Entry{}, err
 	}
+	return c.entry, nil
+}
+
+// parse разбирает .torrent или отдаёт разбор из кэша.
+func (l *Library) parse(path string) (cached, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return cached{}, err
+	}
 	modTime, size := st.ModTime().UnixMilli(), st.Size()
 	if c, ok := l.cache[path]; ok && c.modTime == modTime && c.size == size {
-		return c.entry, nil
+		return c, nil
 	}
 
 	mi, err := metainfo.LoadFromFile(path)
 	if err != nil {
-		return Entry{}, fmt.Errorf("%w: %v", ErrBadTorrent, err)
+		return cached{}, fmt.Errorf("%w: %v", ErrBadTorrent, err)
 	}
 	info, err := mi.UnmarshalInfo()
 	if err != nil {
-		return Entry{}, fmt.Errorf("%w: %v", ErrBadTorrent, err)
+		return cached{}, fmt.Errorf("%w: %v", ErrBadTorrent, err)
 	}
 
-	entry := Entry{
-		ID:      mi.HashInfoBytes().HexString(),
-		Name:    info.BestName(),
-		File:    filepath.Base(path),
-		Length:  info.TotalLength(),
-		Files:   len(info.UpvertedFiles()),
-		AddedAt: modTime,
+	c := cached{
+		modTime: modTime,
+		size:    size,
+		entry: Entry{
+			ID:      mi.HashInfoBytes().HexString(),
+			Name:    info.BestName(),
+			File:    filepath.Base(path),
+			Length:  info.TotalLength(),
+			Files:   len(info.UpvertedFiles()),
+			AddedAt: modTime,
+		},
+		info: &info,
 	}
-	l.cache[path] = cached{modTime: modTime, size: size, entry: entry}
-	return entry, nil
+	l.cache[path] = c
+	return c, nil
+}
+
+// StoredFile — файл торрента на диске: то, что занимает место в хранилище
+// и что чистка может выселить.
+type StoredFile struct {
+	// TorrentID — infohash торрента, которому файл принадлежит.
+	TorrentID string
+	// TorrentFile — путь к .torrent в каталоге библиотеки. По нему выселение
+	// берёт метаинформацию: снять отметки готовности с кусков нужно и у тех
+	// торрентов, которых нет в клиенте (активен всегда ровно один).
+	TorrentFile string
+	// Index — номер файла в торренте.
+	Index int
+	// Rel — путь относительно хранилища, разделитель «/». Это же ключ журнала
+	// просмотров: телевизор смотрит файл, а не торрент.
+	Rel string
+	// Length — размер по метаинформации. Сколько файл занимает НА ДИСКЕ,
+	// библиотека не знает и знать не должна: скачано может быть сколько угодно.
+	Length int64
+	// Active — файл принадлежит активному торренту. Сам по себе это не повод
+	// его беречь: выселять старые серии идущего сериала как раз и надо.
+	Active bool
+}
+
+// StoredFiles перечисляет файлы ВСЕХ торрентов библиотеки.
+//
+// Всех, а не только активного: место занимают все, а в клиенте лежит один.
+// Данные без .torrent (торрент удалили, скачанное оставили — так делает
+// удаление без ?data=1) в список не попадают намеренно: раз запись убрали,
+// а данные просили оставить, чистке решать за человека нечего.
+func (l *Library) StoredFiles() ([]StoredFile, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	entries, err := l.listLocked()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StoredFile, 0, len(entries)*32)
+	for _, e := range entries {
+		path := filepath.Join(l.dir, e.File)
+		c, err := l.parse(path)
+		if err != nil || c.info == nil {
+			// Битый файл уже отфильтрован listLocked; сюда попадёт разве что
+			// торрент, исчезнувший между сканированием и разбором.
+			continue
+		}
+		for _, f := range mediasource.StoreFiles(c.info) {
+			out = append(out, StoredFile{
+				TorrentID:   e.ID,
+				TorrentFile: path,
+				Index:       f.Index,
+				Rel:         f.Rel,
+				Length:      f.Length,
+				Active:      e.ID == l.activeID,
+			})
+		}
+	}
+	return out, nil
 }
 
 // Add принимает .torrent из запроса и кладёт его в каталог.

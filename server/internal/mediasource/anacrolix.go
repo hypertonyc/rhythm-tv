@@ -304,7 +304,14 @@ func (t *Torrent) Files() []File {
 		// webtorrent-овский file.name — это последний сегмент пути,
 		// а не путь целиком (проверено сверкой /api/files с эталоном).
 		p := f.DisplayPath()
-		files = append(files, File{Index: i, Name: path.Base(p), Path: p, Length: f.Length()})
+		files = append(files, File{
+			Index: i, Name: path.Base(p), Path: p,
+			// f.Path(), а не склейка имени с DisplayPath: это ровно тот путь,
+			// по которому файл лежит в хранилище (тем же пользуется
+			// phantom.go), и для торрента из одного файла он не удваивается.
+			StorePath: f.Path(),
+			Length:    f.Length(),
+		})
 	}
 	return files
 }

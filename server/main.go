@@ -28,6 +28,7 @@ import (
 	"github.com/avdav/torrent-media/server/internal/library"
 	"github.com/avdav/torrent-media/server/internal/media"
 	"github.com/avdav/torrent-media/server/internal/mediasource"
+	"github.com/avdav/torrent-media/server/internal/reclaim"
 	"github.com/avdav/torrent-media/server/internal/subs"
 )
 
@@ -166,11 +167,32 @@ func main() {
 		log.Printf("субтитры %s: пусто, серии показываются только со встроенными", subsDir)
 	}
 
+	// Чистка места. Порог и цель — разные величины намеренно: если чистить
+	// ровно до порога, то каждая докачанная серия снова опускает свободное
+	// место под него, и чистка идёт почти непрерывно, по одному файлу за раз.
+	// Ноль в пороге выключает выселение, оставляя показания места на странице.
+	minFree := int64(envInt("STORE_MIN_FREE_GB", 10)) << 30
+	targetFree := int64(envInt("STORE_TARGET_FREE_GB", 20)) << 30
+	keeper := reclaim.New(reclaim.Options{
+		StoreDir:   store,
+		MinFree:    minFree,
+		TargetFree: targetFree,
+		// Журнал просмотров лежит рядом с .tms-active: это тоже память
+		// о выборе человека, и том же каталогу /data она принадлежит.
+		// В хранилище её класть нельзя — TORRENT_STORE_PERSIST=0 стирает его.
+		JournalPath: filepath.Join(libDir, ".tms-watched"),
+		Catalog:     lib,
+		Store:       client,
+		Playing:     func() string { return playingFile(lib, manager) },
+	})
+	go keeper.Run(ctx)
+
 	handler := httpapi.New(httpapi.Deps{
 		Library: lib,
 		Prober:  prober,
 		HLS:     manager,
 		Subs:    subtitles,
+		Disk:    keeper,
 		BaseCtx: ctx,
 	})
 
@@ -220,6 +242,28 @@ func shutdown(srv *http.Server, manager *hls.Manager, lib *library.Library, clie
 		_ = client.Close()
 		os.Exit(0)
 	})
+}
+
+// playingFile — путь файла, который сейчас перекодируется, относительно
+// хранилища; пустая строка, если сеанса нет.
+//
+// Единственное, что чистка обязана беречь: ffmpeg читает этот файл петлёй
+// через /raw, и вынутые из-под него куски означают паузу посреди серии, пока
+// они не приедут заново. Всё остальное выселять можно — недостающее докачается.
+func playingFile(lib *library.Library, manager *hls.Manager) string {
+	snap := manager.ActiveSnapshot()
+	if snap == nil {
+		return ""
+	}
+	src := lib.Current()
+	if src == nil {
+		return ""
+	}
+	files := src.Files()
+	if snap.Index < 0 || snap.Index >= len(files) {
+		return ""
+	}
+	return files[snap.Index].StorePath
 }
 
 // healthcheck возвращает код возврата для docker HEALTHCHECK.
