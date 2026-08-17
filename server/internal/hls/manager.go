@@ -390,7 +390,7 @@ func (m *Manager) snapshotLocked(s *Session) Snapshot {
 		ExitCode:     s.exitCode,
 		Error:        s.errMsg,
 
-		Playlist: "/hls/" + s.id + "/index.m3u8",
+		Playlist: "/hls/" + s.id + "/" + PlaylistName,
 		Format:   "HLS/MPEG-TS",
 	}
 	if s.sub != "off" {

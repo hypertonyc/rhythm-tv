@@ -93,12 +93,21 @@ func (f *fakeLibrary) Remove(id string, withData bool) error {
 type fakeSessions struct {
 	calls  *[]string
 	active *string
+	// dir — каталог сеанса, если тест проверяет отдачу файлов. Пустой означает
+	// «сеанса нет», как и было до появления таких тестов.
+	dir string
 }
 
 func (f *fakeSessions) Start(hls.StartOptions) (hls.Snapshot, error) { return hls.Snapshot{}, nil }
 func (f *fakeSessions) Get(string) (hls.Snapshot, bool)              { return hls.Snapshot{}, false }
 func (f *fakeSessions) ActiveSnapshot() *hls.Snapshot                { return nil }
-func (f *fakeSessions) SessionDir(string) (string, bool)             { return "", false }
+
+func (f *fakeSessions) SessionDir(string) (string, bool) {
+	if f.dir == "" {
+		return "", false
+	}
+	return f.dir, true
+}
 
 func (f *fakeSessions) Stop() *string {
 	*f.calls = append(*f.calls, "stop")

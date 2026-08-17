@@ -73,11 +73,10 @@ func TestBuildArgsMatchesNodeGolden(t *testing.T) {
 				CopyAudio:  sc.Audio != nil && media.CanCopyAudio(sc.Audio, sc.Start, sc.AllowCopy),
 			})
 
-			// Флаги переподключения добавлены осознанно и в эталоне их нет:
-			// без них сеанс на файле без роя умирал сразу (см. args.go).
-			// Вырезаем их и сверяем ВСЁ остальное побайтово — гарантия
-			// на аргументы ffmpeg от этого не слабеет.
-			got = stripReconnectFlags(got)
+			// Наши осознанные добавки, которых в эталоне нет, вырезаются;
+			// ВСЁ остальное сверяется побайтово — гарантия на аргументы
+			// ffmpeg от этого не слабеет.
+			got = stripLocalAdditions(got)
 
 			if !equalArgs(got, golden[i].Args) {
 				t.Errorf("argv разошлись\nполучено: %s\nэталон:   %s",
@@ -115,6 +114,29 @@ func TestBuildArgsOutputIsLast(t *testing.T) {
 	}
 }
 
+// TestPlaylistTypeIsEvent — без EVENT плейлист выглядит как live, и плеер
+// входит за три TARGETDURATION от конца, а не в начало. В режиме copy ffmpeg
+// опережает реальное время в ~15 раз, поэтому серия начиналась с 00:15-00:35.
+// Флаг обязан стоять ПОСЛЕ -f hls: как выходной он относится к муксеру,
+// и ffmpeg отвергает его до появления -f.
+func TestPlaylistTypeIsEvent(t *testing.T) {
+	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", VideoIndex: 0})
+	at := indexOf(args, "-hls_playlist_type")
+	if at < 0 {
+		t.Fatal("нет -hls_playlist_type: телевизор снова будет входить не в начало серии")
+	}
+	if args[at+1] != "event" {
+		t.Errorf("-hls_playlist_type %q, ожидалось event", args[at+1])
+	}
+	if iMuxer := indexOf(args, "-f"); at < iMuxer {
+		t.Errorf("-hls_playlist_type стоит перед -f hls: %s", strings.Join(args, " "))
+	}
+	// EVENT требует hls_list_size 0, иначе ffmpeg выходит с ошибкой.
+	if size := indexOf(args, "-hls_list_size"); size < 0 || args[size+1] != "0" {
+		t.Error("-hls_list_size обязан быть 0: с EVENT ffmpeg иначе не запустится")
+	}
+}
+
 func readJSON(t *testing.T, path string, v any) {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -147,14 +169,17 @@ func indexOf(args []string, want string) int {
 	return -1
 }
 
-// stripReconnectFlags убирает наш префикс переподключения, чтобы остальные
-// аргументы можно было сверять с Node-эталоном как раньше.
-func stripReconnectFlags(args []string) []string {
+// stripLocalAdditions убирает флаги, добавленные уже после порта, чтобы
+// остальные аргументы можно было сверять с Node-эталоном как раньше.
+// Каждый из них закрывает болезнь, которая была и в эталоне (см. args.go):
+// переподключение ко входу и тип плейлиста EVENT.
+func stripLocalAdditions(args []string) []string {
 	skip := map[string]bool{
 		"-reconnect":                  true,
 		"-reconnect_streamed":         true,
 		"-reconnect_on_network_error": true,
 		"-reconnect_delay_max":        true,
+		"-hls_playlist_type":          true,
 	}
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
