@@ -47,13 +47,6 @@ services:
       TORRENT_STORE: /var/lib/tms/store
       TMPDIR: /var/lib/tms/hls
       HLS_ALLOW_COPY: "${HLS_ALLOW_COPY:-1}"
-      # ЭКСПЕРИМЕНТ, по умолчанию выключено. "1" разрешает копировать любой
-      # AAC, а не только AAC-LC ≤2 каналов — то есть HE-AAC и 5.1. Ошибка тут
-      # не падает, а слышна (см. media.CanCopyAudio): в MPEG-TS заголовок ADTS
-      # теряет явную сигнализацию SBR, и декодер, который ему верит, отыграет
-      # HE-AAC на половинной частоте. Включать на один сеанс, слушать ушами,
-      # выключать правкой .env и `docker compose up -d` — без выкатки.
-      HLS_AUDIO_COPY_ANY_AAC: "${HLS_AUDIO_COPY_ANY_AAC:-0}"
       # Без этого каждый деплой стирал бы уже скачанное — а там десятки
       # гигабайт, и качать их заново пришлось бы сутками.
       TORRENT_STORE_PERSIST: "1"

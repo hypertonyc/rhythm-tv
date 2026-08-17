@@ -79,9 +79,7 @@ func TestCanCopyAudio(t *testing.T) {
 		{name: "выключено", allow: false, want: false},
 		{name: "перемотка", start: 30, allow: true, want: false},
 		{name: "не aac", mut: func(a *AudioTrack) { a.Codec = "ac3" }, allow: true, want: false},
-		{name: "профиль HE-AAC", mut: func(a *AudioTrack) { a.Profile = "HE-AAC" }, allow: true, want: false},
 		{name: "профиль в нижнем регистре", mut: func(a *AudioTrack) { a.Profile = "lc" }, allow: true, want: true},
-		{name: "5.1", mut: func(a *AudioTrack) { a.Channels = 6 }, allow: true, want: false},
 		{name: "моно разрешено", mut: func(a *AudioTrack) { a.Channels = 1 }, allow: true, want: true},
 		{name: "нет каналов", mut: func(a *AudioTrack) { a.Channels = 0 }, allow: true, want: false},
 		{name: "44.1 кГц", mut: func(a *AudioTrack) { a.SampleRate = 44100 }, allow: true, want: true},
@@ -94,53 +92,55 @@ func TestCanCopyAudio(t *testing.T) {
 			if c.mut != nil {
 				c.mut(a)
 			}
-			if got := CanCopyAudio(a, c.start, c.allow, false); got != c.want {
+			if got := CanCopyAudio(a, c.start, c.allow); got != c.want {
 				t.Errorf("CanCopyAudio = %v, ожидалось %v", got, c.want)
 			}
 		})
 	}
 
-	if CanCopyAudio(nil, 0, true, false) {
+	if CanCopyAudio(nil, 0, true) {
 		t.Error("CanCopyAudio(nil) обязан быть false")
 	}
 }
 
-// TestCanCopyAudioAnyAAC фиксирует границы экспериментального рычага
-// HLS_AUDIO_COPY_ANY_AAC: он снимает ровно две проверки из четырёх.
-// Если однажды окажется, что телевизор такой звук играет, эти случаи станут
-// умолчанием — и тогда важно знать, что именно было разрешено, а что нет.
-func TestCanCopyAudioAnyAAC(t *testing.T) {
-	// Дорожка из «Друзей» s03e18, eng — ровно та, ради которой рычаг заведён.
-	heaac51 := func() *AudioTrack {
-		return &AudioTrack{Codec: "aac", Profile: "HE-AAC", Channels: 6, SampleRate: 48000}
-	}
-
-	if CanCopyAudio(heaac51(), 0, true, false) {
-		t.Error("HE-AAC 5.1 обязан перекодироваться, пока рычаг выключен")
-	}
-	if !CanCopyAudio(heaac51(), 0, true, true) {
-		t.Error("HE-AAC 5.1 обязан копироваться при включённом рычаге")
-	}
-
-	// А это рычаг НЕ снимает: он про профиль и каналы, а не про всё подряд.
-	wide := func(mut func(*AudioTrack)) *AudioTrack {
-		a := heaac51()
-		mut(a)
+// TestCanCopyAudioWiderThanNode держит осознанное расхождение с эталоном.
+//
+// В Node (и у нас до 17.08.2026) копировался только AAC-LC до двух каналов —
+// «ровно то, во что мы иначе перекодировали бы сами». Из-за профиля и числа
+// каналов перекодировался звук каждой серии «Друзей»: английская дорожка там
+// HE-AAC 5.1. Проверено на телевизоре — играет; разбор рисков и того, что
+// именно проверено, в комментарии к CanCopyAudio.
+//
+// Эти случаи НЕЛЬЗЯ переносить в testdata/args_scenarios.json: там эталон
+// ответит transcode, и golden-тест упадёт. Расхождение живёт здесь.
+func TestCanCopyAudioWiderThanNode(t *testing.T) {
+	// Дорожка из «Друзей» s03e19, eng — ровно та, на которой это проверялось.
+	heaac51 := func(mut func(*AudioTrack)) *AudioTrack {
+		a := &AudioTrack{Codec: "aac", Profile: "HE-AAC", Channels: 6, SampleRate: 48000}
+		if mut != nil {
+			mut(a)
+		}
 		return a
 	}
-	if CanCopyAudio(wide(func(a *AudioTrack) { a.Codec = "ac3" }), 0, true, true) {
-		t.Error("AC-3 остаётся вне whitelist'а при любом значении рычага")
+
+	if !CanCopyAudio(heaac51(nil), 0, true) {
+		t.Error("HE-AAC 5.1 обязан копироваться: Node перекодировал бы, мы — нет")
 	}
-	if CanCopyAudio(wide(func(a *AudioTrack) { a.SampleRate = 32000 }), 0, true, true) {
+
+	// А это расширение НЕ трогает — иначе оно перестало бы быть про AAC.
+	if CanCopyAudio(heaac51(func(a *AudioTrack) { a.Codec = "ac3" }), 0, true) {
+		t.Error("AC-3 остаётся вне whitelist'а")
+	}
+	if CanCopyAudio(heaac51(func(a *AudioTrack) { a.SampleRate = 32000 }), 0, true) {
 		t.Error("частота вне 44.1/48 кГц остаётся вне whitelist'а")
 	}
-	if CanCopyAudio(wide(func(a *AudioTrack) { a.Channels = 0 }), 0, true, true) {
+	if CanCopyAudio(heaac51(func(a *AudioTrack) { a.Channels = 0 }), 0, true) {
 		t.Error("дорожка без каналов не разобрана ffprobe — копировать нечего")
 	}
-	if CanCopyAudio(heaac51(), 30, true, true) {
-		t.Error("перемотка гасит копирование звука независимо от рычага")
+	if CanCopyAudio(heaac51(nil), 30, true) {
+		t.Error("перемотка гасит копирование звука независимо от профиля")
 	}
-	if CanCopyAudio(heaac51(), 0, false, true) {
-		t.Error("HLS_ALLOW_COPY=0 сильнее рычага")
+	if CanCopyAudio(heaac51(nil), 0, false) {
+		t.Error("HLS_ALLOW_COPY=0 сильнее расширенного whitelist'а")
 	}
 }

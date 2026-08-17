@@ -41,6 +41,13 @@ type goldenEntry struct {
 // toFixed(3), решения copy/transcode, срезание суффикса дизамбигуации в
 // -var_stream_map и отсутствие a:0, когда звука нет.
 //
+// Одного расхождения эталон не видит и увидеть не должен: media.CanCopyAudio
+// шире Node и копирует любой AAC, а не только AAC-LC ≤2 каналов. В сценариях
+// такой дорожки нет (многоканальный там ac3, который не копируется ни там,
+// ни тут), поэтому эталон сходится. Добавить сюда HE-AAC или AAC 5.1 —
+// значит СЛОМАТЬ этот тест намеренно: Node на них ответит transcode.
+// Их место — TestCanCopyAudioWiderThanNode в internal/media.
+//
 // Пересобрать эталон (нужен Docker, node в системе не установлен):
 //
 //	docker run --rm -v "$PWD/testdata:/w" -w /w node:22-slim \
@@ -70,9 +77,7 @@ func TestBuildArgsMatchesNodeGolden(t *testing.T) {
 				Subtitle:   sc.Subtitle,
 				Start:      sc.Start,
 				CopyVideo:  media.CanCopyVideo(sc.Meta.Video, sc.Start, sc.AllowCopy),
-				// Последний false — HLS_AUDIO_COPY_ANY_AAC: эталон
-				// про этот рычаг не знает, и golden снимался без него.
-				CopyAudio: sc.Audio != nil && media.CanCopyAudio(sc.Audio, sc.Start, sc.AllowCopy, false),
+				CopyAudio:  sc.Audio != nil && media.CanCopyAudio(sc.Audio, sc.Start, sc.AllowCopy),
 			})
 
 			// Наши осознанные добавки, которых в эталоне нет, вырезаются;
