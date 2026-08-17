@@ -74,6 +74,10 @@ func main() {
 	probeTimeout := time.Duration(envInt("PROBE_TIMEOUT_MS", 25000)) * time.Millisecond
 	// Любое значение кроме "0" включает копирование дорожек без перекодирования.
 	allowCopy := os.Getenv("HLS_ALLOW_COPY") != "0"
+	// Экспериментальное расширение whitelist'а звука на любой AAC (HE-AAC,
+	// многоканальный). По умолчанию выключено — почему, написано
+	// в media.CanCopyAudio.
+	copyAnyAAC := os.Getenv("HLS_AUDIO_COPY_ANY_AAC") == "1"
 	store := os.Getenv("TORRENT_STORE")
 	if store == "" {
 		store = filepath.Join(os.TempDir(), "webtorrent")
@@ -140,8 +144,9 @@ func main() {
 	}
 
 	manager := &hls.Manager{
-		AllowCopy: allowCopy,
-		RawURL:    rawURL,
+		AllowCopy:  allowCopy,
+		CopyAnyAAC: copyAnyAAC,
+		RawURL:     rawURL,
 		// Счётчик берётся у активного торрента на каждый вызов: после
 		// переключения downloadedSinceStart должен считаться по новому.
 		Downloaded: func() int64 {

@@ -70,7 +70,9 @@ func TestBuildArgsMatchesNodeGolden(t *testing.T) {
 				Subtitle:   sc.Subtitle,
 				Start:      sc.Start,
 				CopyVideo:  media.CanCopyVideo(sc.Meta.Video, sc.Start, sc.AllowCopy),
-				CopyAudio:  sc.Audio != nil && media.CanCopyAudio(sc.Audio, sc.Start, sc.AllowCopy),
+				// Последний false — HLS_AUDIO_COPY_ANY_AAC: эталон
+				// про этот рычаг не знает, и golden снимался без него.
+				CopyAudio: sc.Audio != nil && media.CanCopyAudio(sc.Audio, sc.Start, sc.AllowCopy, false),
 			})
 
 			// Наши осознанные добавки, которых в эталоне нет, вырезаются;

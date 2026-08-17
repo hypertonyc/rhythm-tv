@@ -37,6 +37,9 @@ type Manager struct {
 	FFmpeg string
 	// AllowCopy — HLS_ALLOW_COPY: false заставляет перекодировать всегда.
 	AllowCopy bool
+	// CopyAnyAAC — HLS_AUDIO_COPY_ANY_AAC: копировать любой AAC, а не только
+	// AAC-LC ≤2 каналов. Экспериментальный рычаг, риски — в media.CanCopyAudio.
+	CopyAnyAAC bool
 	// RawURL отдаёт адрес, по которому ffmpeg читает файл через наш HTTP.
 	RawURL func(index int) string
 	// Downloaded — текущий счётчик скачанного, для downloadedSinceStart.
@@ -98,7 +101,7 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 	}
 
 	copyVideo := media.CanCopyVideo(meta.Video, opts.Start, m.AllowCopy)
-	copyAudio := audio != nil && media.CanCopyAudio(audio, opts.Start, m.AllowCopy)
+	copyAudio := audio != nil && media.CanCopyAudio(audio, opts.Start, m.AllowCopy, m.CopyAnyAAC)
 
 	args := BuildArgs(Params{
 		RawURL:     m.RawURL(opts.Index),
