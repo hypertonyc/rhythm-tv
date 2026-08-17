@@ -49,6 +49,15 @@
 
     <div id="playerScreen" class="player-screen hidden">
         <canvas id="subtitleCanvas" class="subtitle-canvas"></canvas>
+        <!-- Перемотка — это новый сеанс ffmpeg, то есть 15-20 секунд чёрного
+             экрана (см. CLAUDE.md). Всё это время карточка — единственное,
+             что видит человек: куда едем, чем занят сервер и сколько ждать. -->
+        <div id="waitCard" class="wait-card hidden">
+            <div id="waitTitle" class="wait-title"></div>
+            <div id="waitPhase" class="wait-phase"></div>
+            <div class="wait-bar"><div id="waitBar" class="wait-bar-fill"></div></div>
+            <div id="waitTime" class="wait-time"></div>
+        </div>
         <div id="playerHud" class="player-hud">
             <div id="hudTitle" class="hud-title"></div>
             <div id="hudStatus" class="hud-status"></div>

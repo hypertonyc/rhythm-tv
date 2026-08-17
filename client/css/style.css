@@ -216,6 +216,60 @@ html, body {
     background: transparent;
 }
 
+/* Карточка ожидания на чёрном экране между сеансами. Ставится по центру,
+ * а не в HUD внизу: смотрят её с дивана, и это единственное, что на экране
+ * есть. Ширина фиксированная — текст фазы меняется, а прыгающая по ширине
+ * карточка на телевизоре читается хуже, чем неподвижная. */
+.wait-card {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 900px;
+    margin-left: -450px;
+    margin-top: -150px;
+    z-index: 25;
+    box-sizing: border-box;
+    padding: 40px 50px;
+    border-radius: 14px;
+    background: rgba(0, 0, 0, 0.72);
+    text-align: center;
+}
+
+.wait-title {
+    font-size: 42px;
+    font-weight: bold;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.wait-phase {
+    height: 36px;
+    margin-top: 20px;
+    font-size: 28px;
+    color: #ffd166;
+}
+
+.wait-bar {
+    height: 12px;
+    margin-top: 28px;
+    border-radius: 6px;
+    background: #2a2d33;
+    overflow: hidden;
+}
+
+.wait-bar-fill {
+    width: 0;
+    height: 100%;
+    background: #ffd166;
+}
+
+.wait-time {
+    margin-top: 18px;
+    font-size: 26px;
+    color: #b7bbc2;
+}
+
 .player-hud {
     position: absolute;
     left: 0;

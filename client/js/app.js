@@ -58,6 +58,15 @@
     var seekCommitMs = 900;
     /* Номер попытки старта, см. startPlayback. */
     var startGeneration = 0;
+    /* Ожидание нового сеанса — чёрный экран между закрытием AVPlay
+     * и первой картинкой. См. beginWait. */
+    var waitStartedAt = 0;
+    var waitKind = 'start';
+    var waitSnapshot = null;
+    /* Ответ /api/pipeline: настоящий ход перекодирования от самого ffmpeg. */
+    var waitProgress = null;
+    var waitSwarm = '';
+    var waitTicker = null;
     var subtitlePlaylistUrl = '';
     var subtitlePollTimer = null;
     var subtitleCues = [];
@@ -919,6 +928,162 @@
         el('hudClock').innerHTML = fmt(absoluteTime()) + ' / ' + fmt(total);
     }
 
+    /* Запасная оценка: сколько такое ожидание длилось в прошлые разы.
+     *
+     * Нужна там, где настоящего прогресса ещё нет. А нет его ровно в самой
+     * долгой части ожидания: пока ffmpeg не прочитал вход, он не отчитывается
+     * вовсе, и это как раз то время, что уходит на разогрев роя. Показывать
+     * там пустоту нельзя, а врать процентами — тем более, поэтому в дело идёт
+     * среднее по собственным прошлым ожиданиям.
+     *
+     * Считается отдельно для перемотки и для старта с нуля, потому что это
+     * разные по природе величины: старт с нуля часто идёт копированием
+     * и укладывается в пару секунд, перемотка всегда перекодируется. Общее
+     * среднее врало бы обоим. */
+    function waitEstimateMs(kind) {
+        var v = Number(storeGet('rtv.wait.' + kind, '0')) || 0;
+        if (v > 0) return v;
+        return kind === 'seek' ? 18000 : 8000;
+    }
+
+    function rememberWait(kind, ms) {
+        /* Мгновенный старт и получасовое ожидание одинаково бесполезны как
+         * оценка: первое бывает на подобранном сеансе, второе — на мёртвом рое. */
+        if (ms < 700 || ms > 120000) return;
+        var prev = Number(storeGet('rtv.wait.' + kind, '0')) || 0;
+        storeSet('rtv.wait.' + kind, prev > 0 ? Math.round(prev * 0.7 + ms * 0.3) : Math.round(ms));
+    }
+
+    /* Есть ли НАСТОЯЩИЙ прогресс — отчёт самого ffmpeg о том, сколько видео
+     * он уже произвёл (/api/pipeline). Пока его нет, всё, что можно честно
+     * сказать, это «сколько ждём» и «чем занят сервер». */
+    function waitHasProgress() {
+        return !!(waitProgress && waitProgress.encodedMs !== null &&
+            waitProgress.encodedMs !== undefined && waitProgress.startupTargetMs > 0);
+    }
+
+    /* Чем сервер занят прямо сейчас. Разница между «тянем с роя»
+     * и «перекодируем» несущая: в первом случае ждать дольше и виноват
+     * не процессор, а рой — и это единственное, что человек может починить сам
+     * (подождать, пока серия докачается, вместо новой перемотки). */
+    function waitPhaseText() {
+        var s = waitSnapshot;
+        if (waitHasProgress()) {
+            var mode = waitProgress.pipeline && waitProgress.pipeline.video
+                ? waitProgress.pipeline.video.mode : '';
+            var speed = waitProgress.speed
+                ? ' at ' + waitProgress.speed.toFixed(waitProgress.speed >= 10 ? 0 : 1) + 'x'
+                : '';
+            return (mode === 'copy' ? 'Copying ' : 'Transcoding ') +
+                (waitProgress.encodedMs / 1000).toFixed(1) + 's of ' +
+                Math.round(waitProgress.startupTargetMs / 1000) + 's' + speed;
+        }
+        if (!s) return 'Asking the server…';
+        if ((s.segments || 0) >= 1) return 'Buffering · ' + s.segments + ' of 2 startup segments';
+        /* ffmpeg ещё не отчитался ни разу — он сидит на чтении входа.
+         * Для нас это ожидание данных из роя, и сказать так честнее,
+         * чем «перекодируем»: процессор тут ни при чём. */
+        if ((s.downloadedSinceStart || 0) > 0) return 'Reading the episode from peers…';
+        return 'Starting ffmpeg…';
+    }
+
+    function renderWait() {
+        if (!waitStartedAt) return;
+        var elapsed = new Date().getTime() - waitStartedAt;
+        var seconds = Math.round(elapsed / 1000);
+        var percent, tail;
+
+        if (waitHasProgress()) {
+            /* Настоящая доля работы: произведено видео из того, что нужно
+             * до первой картинки. Потолок 99, а не 100, — сотня на экране,
+             * за которой ещё что-то происходит, читается как враньё. */
+            percent = Math.min(99, Math.round(waitProgress.encodedMs * 100 / waitProgress.startupTargetMs));
+            tail = waitProgress.etaMs === null || waitProgress.etaMs === undefined
+                ? seconds + 's · ' + percent + '% done'
+                : seconds + 's · about ' + Math.max(1, Math.round(waitProgress.etaMs / 1000)) + 's left';
+        } else {
+            /* Прогресса пока нет — идёт по запасной оценке. Полоса тогда
+             * показывает ход относительно ОЖИДАЕМОГО времени, а не остаток
+             * работы, поэтому до края не доходит никогда: упёршись в 100%,
+             * она соврала бы «вот-вот», сколько бы ни продолжалось ожидание. */
+            var estimate = waitEstimateMs(waitKind);
+            percent = Math.min(96, Math.round(elapsed * 100 / estimate));
+            tail = elapsed > estimate + 3000
+                ? seconds + 's · longer than usual (~' + Math.round(estimate / 1000) + 's)'
+                : seconds + 's of about ' + Math.round(estimate / 1000) + 's';
+        }
+
+        el('waitBar').style.width = percent + '%';
+        el('waitPhase').innerHTML = escapeHtml(waitPhaseText() + (waitSwarm ? ' · ' + waitSwarm : ''));
+        el('waitTime').innerHTML = escapeHtml(tail);
+    }
+
+    /* Опрос настоящего прогресса, отдельно от waitForHls и НАРОЧНО реже.
+     *
+     * Отдельно — потому что это украшение, а воспроизведение украшением
+     * рисковать не должно: /api/pipeline появился позже телевизора, и откат
+     * сервера на прежний образ отвечал бы 404. Здесь это просто «прогресса
+     * нет, показываем оценку», а попади тот же запрос в waitForHls — тот же
+     * 404 увёл бы в меню сеанс, который прекрасно играет.
+     *
+     * Реже — потому что цифра меняется плавно, а лишний XHR на этом железе
+     * стоит дороже, чем кажется. Опрос живёт ровно столько, сколько чёрный
+     * экран: его гасит и endWait, и смена номера попытки. */
+    function pollWaitProgress(generation, sessionId) {
+        if (generation !== startGeneration || !waitStartedAt) return;
+        api('/api/pipeline/' + encodeURIComponent(sessionId) + '?_=' + new Date().getTime(), function (err, p) {
+            if (generation !== startGeneration || !waitStartedAt) return;
+            if (!err && p) {
+                waitProgress = p;
+                renderWait();
+            }
+            setTimeout(function () { pollWaitProgress(generation, sessionId); }, 1400);
+        }, 8000);
+    }
+
+    /* Перемотка это новый сеанс ffmpeg, а он стоит 15-20 секунд (см. seekRelative),
+     * и всё это время на экране нет ничего: AVPlay закрыт. Раньше там менялись
+     * наперегонки две строки в разных форматах — «Preparing HLS: 0/2» от опроса
+     * сеанса и «Server: preparing · 0 segments» от опроса статуса, — а по ним
+     * нельзя было понять ни чем сервер занят, ни сколько ещё ждать.
+     *
+     * Теперь чёрным экраном распоряжается одна карточка: куда едем, чем занят
+     * сервер, сколько сделано и сколько осталось. Доля работы настоящая —
+     * ffmpeg докладывает, сколько видео произвёл (/api/pipeline), а нужно ему
+     * произвести два стартовых сегмента.
+     *
+     * Секундомер при этом тикает раз в секунду САМ, а не по ответу сервера,
+     * и это не украшение: пока ffmpeg не прочитал вход, он молчит вовсе,
+     * ответы не меняются, и неподвижный экран неотличим от зависшего. */
+    function beginWait(kind, targetSeconds) {
+        waitStartedAt = new Date().getTime();
+        waitKind = kind;
+        waitSnapshot = null;
+        waitProgress = null;
+        waitSwarm = '';
+        el('waitTitle').innerHTML = escapeHtml(kind === 'seek'
+            ? 'Jumping to ' + fmt(targetSeconds)
+            : (meta ? meta.name : 'Starting'));
+        el('waitCard').className = 'wait-card';
+        /* HUD внизу на время ожидания убирается совсем: показывать он может
+         * только часы остановленного плеера, а рядом с карточкой это выглядит
+         * как два спорящих экрана. Обратно его вернёт showHud из openPlaylist,
+         * когда появится картинка. */
+        if (hudTimer) clearTimeout(hudTimer);
+        el('playerHud').className = 'player-hud hidden-hud';
+        renderWait();
+        if (waitTicker) clearInterval(waitTicker);
+        waitTicker = setInterval(renderWait, 1000);
+    }
+
+    function endWait(succeeded) {
+        if (waitTicker) clearInterval(waitTicker);
+        waitTicker = null;
+        if (succeeded && waitStartedAt) rememberWait(waitKind, new Date().getTime() - waitStartedAt);
+        waitStartedAt = 0;
+        el('waitCard').className = 'wait-card hidden';
+    }
+
     /* Конец серии. Зовётся из onstreamcompleted и из oncurrentplaytime, когда
      * прошивка это событие проглотила, поэтому обязана быть идемпотентной:
      * playNextEpisode закрывает AVPlay и меняет meta, а stopPlayback уводит
@@ -1038,18 +1203,22 @@
                 try {
                     webapis.avplay.play();
                     restarting = false;
+                    endWait(true);
                     showHud('Playing');
                 } catch (e1) {
                     restarting = false;
+                    endWait(false);
                     showHud('Play failed: ' + e1.message);
                 }
             }, function (err) {
                 if (generation !== startGeneration) return;
                 restarting = false;
+                endWait(false);
                 showHud('Prepare failed: ' + (err && err.message ? err.message : String(err)));
             });
         } catch (e) {
             restarting = false;
+            endWait(false);
             showHud('AVPlay open failed: ' + e.message);
         }
     }
@@ -1061,11 +1230,13 @@
             if (generation !== startGeneration) return;
             if (err) {
                 restarting = false;
+                endWait(false);
                 showHud('HLS status failed: ' + err.message);
                 return;
             }
             if (s.state === 'error') {
                 restarting = false;
+                endWait(false);
                 showHud('HLS generation failed');
                 return;
             }
@@ -1077,7 +1248,10 @@
                 openPlaylist(generation, serverBase + playlist + '?_=' + new Date().getTime());
                 return;
             }
-            showHud('Preparing HLS: ' + (s.segments || 0) + '/2 startup segments…');
+            /* Строку статуса больше не трогаем: чёрным экраном распоряжается
+             * карточка ожидания, а HUD внизу пусть спокойно уйдёт по таймеру. */
+            waitSnapshot = s;
+            renderWait();
             setTimeout(function () { waitForHls(generation, sessionId, playlist); }, 700);
         }, 12000);
     }
@@ -1112,7 +1286,7 @@
         el('av-player').style.display = 'block';
         el('hudTitle').innerHTML = meta.name;
         updateHudClock();
-        showHud('Starting HLS…');
+        beginWait(seconds > 0 ? 'seek' : 'start', seconds);
 
         var path = '/api/start/' + meta.index + '?audio=' + encodeURIComponent(selectedAudioCode()) +
             '&sub=' + encodeURIComponent(selectedSubCode()) + '&start=' + encodeURIComponent(seconds.toFixed(3)) +
@@ -1121,12 +1295,14 @@
             if (generation !== startGeneration) return;
             if (err) {
                 restarting = false;
+                endWait(false);
                 showHud('Cannot start HLS: ' + err.message);
                 return;
             }
             currentSessionId = data.id;
             startSubtitleOverlay(data.subtitlePlaylist || '');
             waitForHls(generation, data.id, data.playlist);
+            pollWaitProgress(generation, data.id);
         }, 30000);
     }
 
@@ -1209,6 +1385,7 @@
     function stopPlayback(toMenu, message) {
         if (meta) savePosition(meta.index, absoluteTime());
         cancelPendingSeek();
+        endWait(false);
         /* Ни одна начатая попытка старта больше не наша: она могла быть в полёте
          * (Back нажали, пока сеанс готовился) и дописала бы currentSessionId
          * уже после того, как мы его очистили. */
@@ -1267,7 +1444,15 @@
                 return;
             }
             el('serverStatus').innerHTML = s.peers + ' peers · ' + fmtSpeed(s.downloadSpeed);
-            if (mode === 'player' && s.playback && s.playback.state && s.playback.state !== 'ready' && s.playback.state !== 'finished') {
+            if (waitStartedAt) {
+                /* Пока идёт чёрный экран, статусом распоряжается карточка,
+                 * и писать в hudStatus отсюда нельзя: именно две строки
+                 * в разных форматах, менявшиеся наперегонки, и выглядели
+                 * как «статус мигает и ничего не понятно». Пиры и скорость
+                 * при этом нужны — на них видно, что ждём мы рой. */
+                waitSwarm = s.peers + ' peers · ' + fmtSpeed(s.downloadSpeed);
+                renderWait();
+            } else if (mode === 'player' && s.playback && s.playback.state && s.playback.state !== 'ready' && s.playback.state !== 'finished') {
                 el('hudStatus').innerHTML = 'Server: ' + s.playback.state + ' · ' + (s.playback.segments || 0) + ' segments';
             }
             if (mode === 'player') {

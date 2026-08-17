@@ -31,6 +31,9 @@ var (
 	reRaw       = regexp.MustCompile(`^/raw/(\d+)$`)
 	reStart     = regexp.MustCompile(`^/api/start/(\d+)$`)
 	reHLSStatus = regexp.MustCompile(`^/api/hls-status/([A-Za-z0-9-]+)$`)
+	// Ход перекодирования. В Node-эталоне такого маршрута нет, поэтому
+	// в сверке контракта он не участвует и формат ответа свободен.
+	rePipeline = regexp.MustCompile(`^/api/pipeline/([A-Za-z0-9-]+)$`)
 	reHLSFile   = regexp.MustCompile(
 		`^/hls/([A-Za-z0-9-]+)/([A-Za-z0-9._-]+\.(?:[Mm]3[Uu]8|[Tt][Ss]|[Vv][Tt][Tt]))$`)
 	// Библиотека торрентов. Этих маршрутов в Node-эталоне нет вовсе, поэтому
@@ -67,6 +70,8 @@ type Sessions interface {
 	Get(id string) (hls.Snapshot, bool)
 	ActiveSnapshot() *hls.Snapshot
 	SessionDir(id string) (string, bool)
+	// Progress — ход перекодирования; пустой id означает активный сеанс.
+	Progress(id string) (hls.Progress, bool)
 }
 
 // Disk — место под скачанное глазами HTTP-слоя; это *reclaim.Keeper.
@@ -190,6 +195,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/metrics":
 		s.handleMetrics(w, r)
 		return
+	case "/api/pipeline":
+		s.handlePipeline(w, "")
+		return
 	}
 
 	if m := reTorrentAction.FindStringSubmatch(path); m != nil {
@@ -228,6 +236,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, snap)
+		return
+	}
+	if m := rePipeline.FindStringSubmatch(path); m != nil {
+		s.handlePipeline(w, m[1])
 		return
 	}
 	if m := reHLSFile.FindStringSubmatch(path); m != nil {

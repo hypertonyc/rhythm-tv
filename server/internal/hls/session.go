@@ -53,8 +53,15 @@ type Session struct {
 	// с какого номера ffmpeg начал»; см. pollSegments.
 	nextSeq *int
 
+	// pipeline — из чего во что идёт перекодирование. Считается один раз
+	// при старте, теми же данными, что решали вопрос о копировании.
+	pipeline Pipeline
+
 	cmd    *exec.Cmd
 	stderr *ringWriter
+	// progress — машинный отчёт ffmpeg о ходе работы. nil у подобранного
+	// сеанса: своего процесса у него нет, а к чужому stdout не подключиться.
+	progress *progressWriter
 
 	stopMonitor chan struct{}
 	monitorDone chan struct{}
@@ -98,6 +105,40 @@ type Snapshot struct {
 	DownloadedSinceStart int64 `json:"downloadedSinceStart"`
 }
 
+// Progress — ответ /api/pipeline: чем сеанс занят прямо сейчас и из чего
+// во что перекодирует.
+//
+// Отдельный тип, а не поля в Snapshot, и это не вкус: Snapshot уходит в поле
+// playback у /api/status, а тот сверяется с Node-эталоном по форме — лишний
+// ключ там ломает сверку. Заодно граница честная: /api/pipeline эталона
+// не имеет вовсе, поэтому его формат можно менять свободно.
+//
+// EncodedMs, Speed и EtaMs — указатели, потому что «не измерено» и ноль здесь
+// разные вещи: ноль в скорости означает «ffmpeg жив и не производит ничего»,
+// то есть симптом, а отсутствие отчёта означает, что он ещё не начинал.
+type Progress struct {
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	Index    int     `json:"index"`
+	State    string  `json:"state"`
+	Start    float64 `json:"start"`
+	Segments int     `json:"segments"`
+
+	// StartupSegments и StartupTargetMs — то, чего ждёт клиент перед первой
+	// картинкой: два сегмента, то есть 8 секунд видео. Цифры уезжают наружу,
+	// а не зашиваются в клиента, чтобы правка -hls_time не сделала прогресс
+	// на экране враньём.
+	StartupSegments int   `json:"startupSegments"`
+	StartupTargetMs int64 `json:"startupTargetMs"`
+
+	EncodedMs *int64   `json:"encodedMs"`
+	Speed     *float64 `json:"speed"`
+	EtaMs     *int64   `json:"etaMs"`
+
+	DownloadedSinceStart int64    `json:"downloadedSinceStart"`
+	Pipeline             Pipeline `json:"pipeline"`
+}
+
 // state сводит фазу, причину остановки и ошибку в одно поле:
 // ошибка важнее остановки, остановка важнее фазы.
 func (s *Session) state() string {
@@ -116,7 +157,7 @@ func (s *Session) advancePhase() {
 		return
 	}
 	switch {
-	case s.segments >= 2:
+	case s.segments >= StartupSegments:
 		s.phase = phaseReady
 	case s.segments >= 1:
 		s.phase = phaseBuffering

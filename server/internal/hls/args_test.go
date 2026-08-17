@@ -179,7 +179,8 @@ func indexOf(args []string, want string) int {
 // stripLocalAdditions убирает флаги, добавленные уже после порта, чтобы
 // остальные аргументы можно было сверять с Node-эталоном как раньше.
 // Каждый из них закрывает болезнь, которая была и в эталоне (см. args.go):
-// переподключение ко входу и тип плейлиста EVENT.
+// переподключение ко входу, тип плейлиста EVENT и машинный отчёт о ходе
+// работы, без которого телевизору нечего показать на чёрном экране.
 func stripLocalAdditions(args []string) []string {
 	skip := map[string]bool{
 		"-reconnect":                  true,
@@ -187,6 +188,7 @@ func stripLocalAdditions(args []string) []string {
 		"-reconnect_on_network_error": true,
 		"-reconnect_delay_max":        true,
 		"-hls_playlist_type":          true,
+		"-progress":                   true,
 	}
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
@@ -197,6 +199,40 @@ func stripLocalAdditions(args []string) []string {
 		out = append(out, args[i])
 	}
 	return out
+}
+
+// TestProgressGoesToStdout — отчёт обязан идти именно в stdout и глобальным
+// флагом. Выход у нас файловый, stdout свободен, а вот попади `-progress`
+// после -i — ffmpeg молча его проигнорирует, и прогресс на экране телевизора
+// навсегда останется «не измерено», без единой ошибки где-либо.
+func TestProgressGoesToStdout(t *testing.T) {
+	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", VideoIndex: 0})
+	at := indexOf(args, "-progress")
+	if at < 0 {
+		t.Fatal("нет -progress: ход перекодирования измерить нечем")
+	}
+	if args[at+1] != "pipe:1" {
+		t.Errorf("-progress %q, ожидалось pipe:1", args[at+1])
+	}
+	if at > indexOf(args, "-i") {
+		t.Error("-progress стоит после -i: как глобальный флаг он будет проигнорирован")
+	}
+}
+
+// TestSegmentSecondsReachesBothPlaces — длина сегмента участвует в двух местах
+// (нарезка и принудительные ключевые кадры) и служит третьему: по ней клиент
+// считает, сколько видео нужно до первой картинки. Разъехавшись, они дали бы
+// либо рваные сегменты, либо тихо врущий прогресс.
+func TestSegmentSecondsReachesBothPlaces(t *testing.T) {
+	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", VideoIndex: 0})
+	at := indexOf(args, "-hls_time")
+	if at < 0 || args[at+1] != strconv.Itoa(SegmentSeconds) {
+		t.Fatalf("-hls_time разошёлся с SegmentSeconds=%d: %s", SegmentSeconds, strings.Join(args, " "))
+	}
+	kf := indexOf(args, "-force_key_frames")
+	if kf < 0 || !strings.Contains(args[kf+1], "n_forced*"+strconv.Itoa(SegmentSeconds)) {
+		t.Fatalf("-force_key_frames разошёлся с SegmentSeconds=%d: %q", SegmentSeconds, args[kf+1])
+	}
 }
 
 // TestReconnectFlagsArePresentAndBeforeInput — флаги входные, после -i

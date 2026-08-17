@@ -104,6 +104,7 @@ type fakeSessions struct {
 	// потому что это разные вещи: подобранный после выкатки сеанс есть в Get,
 	// но активным не является, и подрезка окна входа смотрит именно сюда.
 	activeSnap *hls.Snapshot
+	progress   *hls.Progress
 }
 
 func (f *fakeSessions) Start(hls.StartOptions) (hls.Snapshot, error) { return hls.Snapshot{}, nil }
@@ -116,6 +117,15 @@ func (f *fakeSessions) Get(string) (hls.Snapshot, bool) {
 		return hls.Snapshot{}, false
 	}
 	return *f.snap, true
+}
+
+// Progress отдаёт ход работы, только если тест его завёл: остальным сеанс
+// не нужен вовсе, и «нет сеанса» для них — правильный ответ.
+func (f *fakeSessions) Progress(string) (hls.Progress, bool) {
+	if f.progress == nil {
+		return hls.Progress{}, false
+	}
+	return *f.progress, true
 }
 
 func (f *fakeSessions) SessionDir(string) (string, bool) {

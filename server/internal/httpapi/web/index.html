@@ -471,6 +471,7 @@
   };
 
   let lastFFmpeg = null;
+  let lastPipeline = null;
 
   function renderSession(status) {
     const body = $('sessionBody');
@@ -500,7 +501,6 @@
     const pairs = [
       ['episode index', '[' + pb.index + ']'],
       ['audio / subs', pb.audio + ' / ' + pb.sub],
-      ['pipeline', 'video ' + (pb.videoMode || '?') + ' · audio ' + (pb.audioMode || '?')],
       /* Именно точка входа, а не позиция просмотра: где сейчас playhead
          телевизора, сервер не знает — тот играет сегменты сам и о своём
          времени никому не докладывает. */
@@ -520,7 +520,55 @@
       pairs.push(['exit code', String(pb.exitCode), pb.exitCode === 0 ? '' : 'bad']);
     }
     if (pb.error) pairs.push(['error', pb.error, 'bad']);
-    kv(list, pairs);
+    /* Конвейер и ход работы приезжают отдельным запросом (/api/pipeline):
+       в /api/status их класть нельзя, он сверяется с Node-эталоном. */
+    kv(list, pairs.concat(pipelinePairs(lastPipeline, pb)));
+  }
+
+  /* Из чего во что идёт перекодирование прямо сейчас.
+
+     Строки собирает сервер: правила «level 40 это 4.0», «6 каналов это 5.1»
+     и «в цель уходит ровно то, что стоит в аргументах ffmpeg» живут там же,
+     где решается, копировать дорожку или нет. Вторая их копия здесь разошлась
+     бы с первой молча — и врала бы ровно про то, ради чего этот экран открыт.
+
+     При copy from и to совпадают, поэтому показывается одна строка: «copy»
+     и есть «на выходе то же самое», а стрелка в никуда только мешала бы. */
+  function pipelinePairs(prog, pb) {
+    if (!prog) {
+      return [['video / audio', (pb.videoMode || '?') + ' / ' + (pb.audioMode || '?')]];
+    }
+    const out = [];
+    out.push(pipelineRow('video', prog.pipeline && prog.pipeline.video));
+    out.push(prog.pipeline && prog.pipeline.audio
+      ? pipelineRow('audio', prog.pipeline.audio)
+      : ['audio', 'no audio track']);
+
+    /* Ноль и «не измерено» — разные вещи: ffmpeg молчит, пока не прочитает
+       вход, и для нас это «ждём данных из роя», а не «сделано нисколько». */
+    if (prog.encodedMs === null || prog.encodedMs === undefined) {
+      out.push(['encoded', 'not measured yet — ffmpeg has not reported', 'warn']);
+    } else {
+      const speed = prog.speed ? ' · ' + prog.speed.toFixed(prog.speed >= 10 ? 0 : 2) + 'x' : '';
+      out.push(['encoded', fmtTime(prog.encodedMs / 1000) + ' of video' + speed]);
+    }
+    /* Остаток есть только до первой картинки: дальше ffmpeg работает вперёд
+       без всякого срока, и «осталось N» там означало бы неправду. */
+    if (prog.segments < prog.startupSegments) {
+      const target = fmtTime(prog.startupTargetMs / 1000);
+      const eta = prog.etaMs === null || prog.etaMs === undefined
+        ? 'eta unknown'
+        : 'eta ' + (prog.etaMs / 1000).toFixed(1) + 's';
+      out.push(['startup', prog.segments + '/' + prog.startupSegments +
+        ' segments · needs ' + target + ' of video · ' + eta, 'warn']);
+    }
+    return out;
+  }
+
+  function pipelineRow(label, track) {
+    if (!track) return [label, '—'];
+    if (track.mode === 'copy') return [label + ' · copy', track.from];
+    return [label + ' · transcode', track.from + ' → ' + track.to];
   }
 
   function renderTorrentStats(status) {
@@ -542,6 +590,13 @@
     try {
       const status = await api('/api/status');
       setLive(true, status.ready ? 'live' : 'loading metadata');
+      /* Второй запрос только когда есть о чём спрашивать. Отказ по нему
+         не должен уносить весь экран: сеанс мог кончиться ровно между
+         двумя запросами, и это не ошибка, а обычная гонка. */
+      lastPipeline = null;
+      if (status.playback) {
+        try { lastPipeline = await api('/api/pipeline'); } catch (e) { /* сеанс ушёл */ }
+      }
       renderSession(status);
       renderTorrentStats(status);
     } catch (e) {

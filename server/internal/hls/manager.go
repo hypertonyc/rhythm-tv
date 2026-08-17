@@ -23,6 +23,15 @@ const (
 	cleanupRetry    = 30 * time.Second
 	stderrLimit     = 16000
 	errorTailLimit  = 3000
+
+	// SegmentSeconds — длина сегмента, `-hls_time`. Константа, а не литерал,
+	// потому что по ней же считается, сколько ВИДЕО нужно произвести до старта
+	// воспроизведения: разъехавшись, они превратили бы прогресс на экране
+	// телевизора в тихое враньё.
+	SegmentSeconds = 4
+	// StartupSegments — сколько сегментов ждёт клиент, прежде чем открыть
+	// плейлист. Та же цифра стоит в фазе ready (см. advancePhase).
+	StartupSegments = 2
 )
 
 // Manager владеет ВСЕМ изменяемым состоянием сеансов.
@@ -160,7 +169,9 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 		downloadedAtStart: m.downloaded(),
 		startedAt:         m.now(),
 		phase:             phasePreparing,
+		pipeline:          describePipeline(meta.Video, audio, copyVideo, copyAudio),
 		stderr:            &ringWriter{limit: stderrLimit},
+		progress:          &progressWriter{},
 		stopMonitor:       make(chan struct{}),
 		monitorDone:       make(chan struct{}),
 	}
@@ -171,9 +182,12 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 	writeManifest(s)
 
 	cmd := exec.Command(m.ffmpeg(), args...)
-	// stdout выбрасывается, stderr копится в кольцевом буфере.
-	// StderrPipe использовать нельзя: он запрещает чтение после Wait.
+	// stderr копится в кольцевом буфере, stdout разбирается на ходу
+	// (`-progress pipe:1`). Пайпов не берём ни там, ни там: StdoutPipe
+	// и StderrPipe закрываются в Wait, и читать из них после него нельзя,
+	// а копировщик, которому отдан io.Writer, exec джойнит сам.
 	cmd.Stderr = s.stderr
+	cmd.Stdout = s.progress
 	if err := cmd.Start(); err != nil {
 		// Node в этом случае эмитит и 'error', и 'close' с code === null.
 		// Без этой ветки монитор вечно тикал бы по каталогу, в который
@@ -357,6 +371,67 @@ func (m *Manager) ActiveSnapshot() *Snapshot {
 	}
 	snap := m.snapshotLocked(m.active)
 	return &snap
+}
+
+// Progress отдаёт ход работы по сеансу. Пустой id — активный сеанс.
+func (m *Manager) Progress(id string) (Progress, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s := m.active
+	if id != "" {
+		var ok bool
+		if s, ok = m.sessions[id]; !ok {
+			return Progress{}, false
+		}
+	}
+	if s == nil {
+		return Progress{}, false
+	}
+	return m.progressLocked(s), true
+}
+
+func (m *Manager) progressLocked(s *Session) Progress {
+	p := Progress{
+		ID:              s.id,
+		Name:            s.name,
+		Index:           s.index,
+		State:           s.state(),
+		Start:           s.start,
+		Segments:        s.segments,
+		StartupSegments: StartupSegments,
+		StartupTargetMs: int64(StartupSegments) * SegmentSeconds * 1000,
+		Pipeline:        s.pipeline,
+	}
+	if d := m.downloaded() - s.downloadedAtStart; d > 0 {
+		p.DownloadedSinceStart = d
+	}
+
+	block, seen := s.progress.snapshot()
+	if !seen {
+		// ffmpeg не отчитался ещё ни разу: либо не стартовал, либо сидит
+		// на чтении входа и ждёт данных из роя. Ноль сюда класть нельзя —
+		// это разные вещи, и на экране они выглядят по-разному.
+		return p
+	}
+	if block.HasTime {
+		encoded := block.OutTimeMs
+		p.EncodedMs = &encoded
+	}
+	if block.HasSpeed {
+		speed := block.Speed
+		p.Speed = &speed
+	}
+	// Остаток считается только до первой картинки и только когда есть чем:
+	// после старта воспроизведения ffmpeg работает вперёд без всякого срока,
+	// и «осталось N секунд» там означало бы неправду.
+	if p.EncodedMs != nil && p.Speed != nil && *p.Speed > 0 && s.segments < StartupSegments {
+		if left := p.StartupTargetMs - *p.EncodedMs; left > 0 {
+			eta := int64(float64(left) / *p.Speed)
+			p.EtaMs = &eta
+		}
+	}
+	return p
 }
 
 // SessionDir отдаёт каталог сеанса — по нему отдаются файлы /hls/:id/*.
