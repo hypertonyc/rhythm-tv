@@ -31,10 +31,21 @@
     var mode = 'boot';
     var startOffset = 0;
     var lastPlayerTime = 0;
-    /* Когда AVPlay последний раз сообщал время. Ноль — картинка ещё не пошла.
-     * По этой отметке сторожится молчаливый простой, см. watchForStall. */
+    /* Максимум, до которого доходили часы плеера в этом сеансе. Отдельно
+     * от lastPlayerTime, потому что прошивка умеет откатить время назад,
+     * а вопрос «доигрывали ли мы до конца» после отката всё равно надо
+     * задавать — см. reachedEndOnce. */
+    var maxPlayerTime = 0;
+    /* Когда AVPlay последний раз сообщал ДРУГОЕ время. Ноль — картинка ещё
+     * не пошла. По этой отметке сторожится молчаливый простой, см. watchForStall. */
     var lastPlayTimeAt = 0;
     var stallLimitMs = 30000;
+    /* Сколько до конца серии считается «доиграли» и сколько после этого ждём
+     * onstreamcompleted, прежде чем закончить серию самим. См. endOfEpisodeStuck. */
+    var endZoneSec = 3;
+    var endGraceMs = 10000;
+    var endZoneSince = 0;
+    var lastPlaytimeCallAt = 0;
     var lastSavedAt = 0;
     var prebufferedFor = null;
     var hudTimer = null;
@@ -839,6 +850,50 @@
         return meta ? Number(meta.duration || 0) : 0;
     }
 
+    /* Доходили ли часы плеера до конца серии хоть раз за сеанс. Спрашивается
+     * после отката времени назад, когда absoluteTime() показывает уже начало,
+     * поэтому считается по максимуму, а не по последнему значению. */
+    function reachedEndOnce(withinSec) {
+        var total = durationSeconds();
+        return total > 0 && total - Math.max(0, startOffset + (maxPlayerTime / 1000)) < withinSec;
+    }
+
+    /* Плейлист доигран, а onstreamcompleted не пришёл. Прошивка в этом случае
+     * молча заходит на плейлист заново и крутит seg00000 по кругу — снаружи
+     * это «первые секунды серии повторяются». Сторож по откату времени
+     * (см. oncurrentplaytime) такую петлю поймать не смог: 17.08.2026 часы
+     * AVPlay после захода на второй круг не откатились, а продолжили идти,
+     * и телевизор повторял начало серии, пока его не выключили пультом.
+     *
+     * Ловим по-другому и без опоры на то, что прошивка сделает с часами:
+     * доиграв до конца серии, стоять в конце незачем. Даём прошивке
+     * endGraceMs сказать это самой — в норме она успевает, от края зоны
+     * до конца всего endZoneSec, — и, если не сказала, заканчиваем сами.
+     *
+     * Отсчёт идёт по времени, пока колбэк действительно звонит: на паузе
+     * прошивка его не зовёт вовсе, и стенные часы засчитали бы паузу у самого
+     * конца серии как залипание — пользователь вернулся бы к последним двум
+     * секундам и тут же уехал на следующую серию. Разрыв в звонках сбрасывает
+     * отсчёт, ровно как и явная пауза. */
+    function endOfEpisodeStuck(now, gap) {
+        if (restarting || durationSeconds() <= 0 || durationSeconds() - absoluteTime() > endZoneSec) {
+            endZoneSince = 0;
+            return false;
+        }
+        if (!endZoneSince || gap > 3000) {
+            endZoneSince = now;
+            return false;
+        }
+        if (now - endZoneSince < endGraceMs) return false;
+        var state = '';
+        try { state = webapis.avplay.getState(); } catch (e) {}
+        if (state === 'PAUSED') {
+            endZoneSince = now;
+            return false;
+        }
+        return true;
+    }
+
     function showHud(text) {
         if (mode !== 'player') return;
         el('playerHud').className = 'player-hud';
@@ -876,28 +931,40 @@
             onbufferingcomplete: function () { showHud('Playing'); },
             oncurrentplaytime: function (currentTime) {
                 var incoming = Number(currentTime) || 0;
+                var now = new Date().getTime();
+                var gap = lastPlaytimeCallAt ? now - lastPlaytimeCallAt : 0;
+                lastPlaytimeCallAt = now;
                 /* Доиграв плейлист с EXT-X-ENDLIST, AVPlay на этой прошивке
                  * не всегда зовёт onstreamcompleted: вместо этого он молча
                  * заходит на плейлист заново и тянет seg00000 по кругу.
                  * Снаружи это «первые пять секунд серии повторяются»,
                  * и выйти оттуда можно только пультом.
                  *
-                 * Отличаем по откату времени назад. Перемотка сюда не попадает:
-                 * она идёт через seekRelative с перезапуском сеанса (restarting),
-                 * а конец серии сторожится отдельно — откат засчитывается только
-                 * если до конца оставалось меньше полминуты. Иначе случайный
-                 * ноль на буферизации уводил бы на следующую серию с середины. */
-                if (!restarting && incoming + 60000 < lastPlayerTime &&
-                    durationSeconds() > 0 && durationSeconds() - absoluteTime() < 30) {
+                 * Один из двух сторожей этой петли — откат времени назад
+                 * (второй, на случай когда часы не откатываются вовсе, —
+                 * endOfEpisodeStuck ниже). Перемотка сюда не попадает: она идёт
+                 * через seekRelative с перезапуском сеанса (restarting), а конец
+                 * серии сторожится отдельно — откат засчитывается только если
+                 * до конца оставалось меньше полминуты. Иначе случайный ноль
+                 * на буферизации уводил бы на следующую серию с середины. */
+                if (!restarting && incoming + 60000 < lastPlayerTime && reachedEndOnce(30)) {
                     lastPlayerTime = incoming;
                     streamCompleted();
                     return;
                 }
+                /* Отметка простоя двигается вместе со временем, а не по самому
+                 * факту вызова: прошивка умеет звать этот колбэк с одним и тем же
+                 * значением, и обновление «на каждый звонок» делало watchForStall
+                 * слепым к замершей картинке. Сторожить надо движение. */
+                if (incoming !== lastPlayerTime) lastPlayTimeAt = now;
                 lastPlayerTime = incoming;
-                lastPlayTimeAt = new Date().getTime();
+                if (incoming > maxPlayerTime) maxPlayerTime = incoming;
+                if (endOfEpisodeStuck(now, gap)) {
+                    streamCompleted();
+                    return;
+                }
                 updateHudClock();
                 updateSubtitleOverlay();
-                var now = new Date().getTime();
                 if (now - lastSavedAt > 5000) {
                     lastSavedAt = now;
                     savePosition(meta.index, absoluteTime());
@@ -934,7 +1001,10 @@
     function openPlaylist(url) {
         closeAvplay();
         lastPlayerTime = 0;
+        maxPlayerTime = 0;
         lastPlayTimeAt = 0;
+        endZoneSince = 0;
+        lastPlaytimeCallAt = 0;
         el('av-player').style.display = 'block';
         el('playerScreen').className = 'player-screen';
         el('menuScreen').className = 'screen hidden';
@@ -1001,7 +1071,10 @@
         seconds = Math.max(0, Math.min(Number(seconds) || 0, Math.max(0, durationSeconds() - 1)));
         startOffset = seconds;
         lastPlayerTime = 0;
+        maxPlayerTime = 0;
         lastPlayTimeAt = 0;
+        endZoneSince = 0;
+        lastPlaytimeCallAt = 0;
         prebufferedFor = null;
         resetSubtitles();
         restarting = true;
