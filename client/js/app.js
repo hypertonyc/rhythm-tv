@@ -51,6 +51,13 @@
     var hudTimer = null;
     var statusTimer = null;
     var restarting = false;
+    /* Накопленная перемотка: цель в секундах от начала серии (null — нажатий
+     * не было) и таймер, по которому она уезжает на сервер. См. seekRelative. */
+    var seekPendingTarget = null;
+    var seekTimer = null;
+    var seekCommitMs = 900;
+    /* Номер попытки старта, см. startPlayback. */
+    var startGeneration = 0;
     var subtitlePlaylistUrl = '';
     var subtitlePollTimer = null;
     var subtitleCues = [];
@@ -875,8 +882,11 @@
      * конца серии как залипание — пользователь вернулся бы к последним двум
      * секундам и тут же уехал на следующую серию. Разрыв в звонках сбрасывает
      * отсчёт, ровно как и явная пауза. */
+    /* Взведённая перемотка равносильна здесь restarting: залипнув в конце серии,
+     * человек вправе отмотать назад, и его нажатие копится ещё seekCommitMs —
+     * без этой ветки сторож успел бы уехать на следующую серию первым. */
     function endOfEpisodeStuck(now, gap) {
-        if (restarting || durationSeconds() <= 0 || durationSeconds() - absoluteTime() > endZoneSec) {
+        if (restarting || seekPendingTarget !== null || durationSeconds() <= 0 || durationSeconds() - absoluteTime() > endZoneSec) {
             endZoneSince = 0;
             return false;
         }
@@ -998,7 +1008,12 @@
         }
     }
 
-    function openPlaylist(url) {
+    /* prepareAsync зовёт свой колбэк асинхронно, и за это время перемотка могла
+     * начать новый сеанс — она работает и во время подготовки. Тогда наш AVPlay
+     * уже закрыт из commitSeek, play() бросит, и без проверки номера попытки
+     * прежний колбэк снял бы restarting и написал бы «Play failed» поверх
+     * живого нового сеанса. */
+    function openPlaylist(generation, url) {
         closeAvplay();
         lastPlayerTime = 0;
         maxPlayerTime = 0;
@@ -1019,6 +1034,7 @@
             webapis.avplay.setListener(playerListener());
             try { webapis.avplay.setTimeoutForBuffering(30); } catch (e0) {}
             webapis.avplay.prepareAsync(function () {
+                if (generation !== startGeneration) return;
                 try {
                     webapis.avplay.play();
                     restarting = false;
@@ -1028,6 +1044,7 @@
                     showHud('Play failed: ' + e1.message);
                 }
             }, function (err) {
+                if (generation !== startGeneration) return;
                 restarting = false;
                 showHud('Prepare failed: ' + (err && err.message ? err.message : String(err)));
             });
@@ -1037,9 +1054,11 @@
         }
     }
 
-    function waitForHls(sessionId, playlist) {
+    function waitForHls(generation, sessionId, playlist) {
+        if (generation !== startGeneration) return;
         if (mode !== 'player' && !restarting) return;
         api('/api/hls-status/' + encodeURIComponent(sessionId) + '?_=' + new Date().getTime(), function (err, s) {
+            if (generation !== startGeneration) return;
             if (err) {
                 restarting = false;
                 showHud('HLS status failed: ' + err.message);
@@ -1055,19 +1074,28 @@
              * restarting и HUD — ими распоряжается опрос, заменивший этот. */
             if (s.state === 'stopped' || s.state === 'replaced') return;
             if ((s.segments || 0) >= 2 || s.state === 'finished') {
-                openPlaylist(serverBase + playlist + '?_=' + new Date().getTime());
+                openPlaylist(generation, serverBase + playlist + '?_=' + new Date().getTime());
                 return;
             }
             showHud('Preparing HLS: ' + (s.segments || 0) + '/2 startup segments…');
-            setTimeout(function () { waitForHls(sessionId, playlist); }, 700);
+            setTimeout(function () { waitForHls(generation, sessionId, playlist); }, 700);
         }, 12000);
     }
 
+    /* Каждый старт берёт себе номер, и колбэки чужого номера молчат. Нужно это
+     * потому, что кнопка перемотки работает и во время подготовки сеанса:
+     * /api/start уходит повторно, пока опрос предыдущей попытки ещё жив.
+     * Сервер помечает прежний сеанс replaced, и waitForHls это увидит,
+     * но не обязательно — ответ, посланный до замены, может прийти после неё,
+     * и тогда старый опрос открыл бы плейлист позиции, с которой уже ушли:
+     * каталог заменённого сеанса живёт ещё две минуты и честно отдаёт сегменты. */
     function startPlayback(seconds) {
         if (!meta) {
             refreshMeta(function (err) { if (!err) startPlayback(seconds); });
             return;
         }
+        cancelPendingSeek();
+        var generation = ++startGeneration;
         seconds = Math.max(0, Math.min(Number(seconds) || 0, Math.max(0, durationSeconds() - 1)));
         startOffset = seconds;
         lastPlayerTime = 0;
@@ -1090,6 +1118,7 @@
             '&sub=' + encodeURIComponent(selectedSubCode()) + '&start=' + encodeURIComponent(seconds.toFixed(3)) +
             '&_=' + new Date().getTime();
         api(path, function (err, data) {
+            if (generation !== startGeneration) return;
             if (err) {
                 restarting = false;
                 showHud('Cannot start HLS: ' + err.message);
@@ -1097,7 +1126,7 @@
             }
             currentSessionId = data.id;
             startSubtitleOverlay(data.subtitlePlaylist || '');
-            waitForHls(data.id, data.playlist);
+            waitForHls(generation, data.id, data.playlist);
         }, 30000);
     }
 
@@ -1115,14 +1144,52 @@
         else startPlayback(0);
     }
 
+    /* Перемотки на этой прошивке нет: avplay.seekTo ненадёжен, поэтому каждое
+     * нажатие — это новый сеанс ffmpeg с другим start=. Стоит он 15-20 секунд:
+     * при ненулевом start копирование выключено у обеих дорожек
+     * (media.CanCopyVideo/CanCopyAudio), то есть libx264 с нуля плюс чтение
+     * куска, которого может не быть на диске, — и всё это время restarting.
+     *
+     * Отсюда прежнее поведение, которое снаружи выглядело как «перемотать можно
+     * только на 30 секунд»: первое нажатие уезжало, второе и все следующие
+     * молча терялись на проверке restarting. Сцепить перемотку было нельзя
+     * вовсе — ни четырьмя нажатиями, ни удержанием кнопки.
+     *
+     * Поэтому нажатия складываются в seekPendingTarget, а сеанс перезапускается
+     * один раз, когда нажимать перестали. Четыре нажатия — это +2 минуты
+     * за один перезапуск, а не четыре перезапуска, из которых доедет первый.
+     * Копится и во время перезапуска: startPlayback уже поставил startOffset
+     * в свою цель, поэтому absoluteTime() ниже отсчитывает от неё, а не от нуля.
+     *
+     * AVPlay до самого перезапуска не закрывается — пока пользователь дожимает
+     * кнопку, старая картинка идёт, а цель видна в HUD. */
     function seekRelative(delta) {
-        if (!meta || restarting) return;
-        var target = absoluteTime() + delta;
-        target = Math.max(0, Math.min(target, Math.max(0, durationSeconds() - 1)));
+        if (!meta) return;
+        var base = seekPendingTarget === null ? absoluteTime() : seekPendingTarget;
+        var target = Math.max(0, Math.min(base + delta, Math.max(0, durationSeconds() - 1)));
+        seekPendingTarget = target;
+        showHud((delta < 0 ? 'Rewind to ' : 'Forward to ') + fmt(target) + '…');
+        if (seekTimer) clearTimeout(seekTimer);
+        seekTimer = setTimeout(commitSeek, seekCommitMs);
+    }
+
+    function commitSeek() {
+        seekTimer = null;
+        var target = seekPendingTarget;
+        /* Из плеера успели уйти (Back, конец серии) — перезапускать нечего. */
+        if (target === null || mode !== 'player' || !meta) {
+            seekPendingTarget = null;
+            return;
+        }
         savePosition(meta.index, target);
-        showHud((delta < 0 ? 'Rewind to ' : 'Forward to ') + fmt(target));
         closeAvplay();
-        startPlayback(target);
+        startPlayback(target); /* обнулит seekPendingTarget сам */
+    }
+
+    function cancelPendingSeek() {
+        if (seekTimer) clearTimeout(seekTimer);
+        seekTimer = null;
+        seekPendingTarget = null;
     }
 
     function togglePause() {
@@ -1141,6 +1208,11 @@
 
     function stopPlayback(toMenu, message) {
         if (meta) savePosition(meta.index, absoluteTime());
+        cancelPendingSeek();
+        /* Ни одна начатая попытка старта больше не наша: она могла быть в полёте
+         * (Back нажали, пока сеанс готовился) и дописала бы currentSessionId
+         * уже после того, как мы его очистили. */
+        startGeneration++;
         restarting = false;
         currentSessionId = '';
         lostSessionPolls = 0;
@@ -1160,6 +1232,9 @@
             stopPlayback(true, 'No next episode.');
             return;
         }
+        /* Пока идёт проба следующей серии, mode ещё player: накопленная
+         * перемотка успела бы уехать по индексу уже другой серии. */
+        cancelPendingSeek();
         closeAvplay();
         resetSubtitles();
         apiIgnore('/api/stop');
@@ -1270,6 +1345,9 @@
      * картинка действительно пошла. */
     function watchForStall() {
         if (mode !== 'player' || restarting || !lastPlayTimeAt) return;
+        /* Накопленная перемотка вот-вот перезапустит сеанс сама, и в точку,
+         * которую выбрал человек, а не в ту, где картинка встала. */
+        if (seekPendingTarget !== null) return;
         if (new Date().getTime() - lastPlayTimeAt < stallLimitMs) return;
 
         var state = '';
