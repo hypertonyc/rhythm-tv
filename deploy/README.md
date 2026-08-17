@@ -96,7 +96,20 @@ sudo -u tmsdeploy bash -c 'read -rs PAT && echo "$PAT" | docker login ghcr.io -u
 
 sudo -u tmsdeploy cp deploy/.env.example /srv/rhythm-tv/deploy/.env
 sudo chmod 600 /srv/rhythm-tv/deploy/.env      # и отредактировать под себя
+
+# ПРОВЕРИТЬ, что logrotate вообще установлен: в образе этого провайдера его нет,
+# хотя /etc/logrotate.d/nginx приезжает вместе с nginx и выглядит рабочим.
+# Крутить его при этом некому, и access.log растёт без предела — за неделю
+# он набрал 143 МБ. Это не только место: по этому логу читаются и правило
+# прошивки со входом в плейлист, и «первые пять секунд по кругу».
+dpkg -s logrotate >/dev/null 2>&1 || sudo apt-get install -y logrotate
+systemctl list-timers logrotate.timer --no-pager   # должен быть в списке
+# Заодно ограничить journald, иначе он растёт до 10% диска (~4 ГБ):
+#   SystemMaxUse=200M в /etc/systemd/journald.conf
 ```
+
+Логи самого контейнера ограничены в `compose.yaml` (`json-file`, `max-size: 10m`,
+`max-file: 3`) — это единственное место, где ротация была настроена изначально.
 
 `restrict` (OpenSSH ≥ 7.2) уже включает запрет проброса портов, агента, pty
 и X11. На старом sshd их надо перечислить явно.
