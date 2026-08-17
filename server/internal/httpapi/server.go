@@ -94,6 +94,8 @@ type Deps struct {
 	Subs *subs.Library
 	// Disk — чистка места; nil выключает и отметки просмотра, и поле storage.
 	Disk Disk
+	// Metrics — показания дашборда; nil означает, что /api/metrics отвечает 503.
+	Metrics Metrics
 	// BaseCtx живёт столько же, сколько процесс. Нужен префетчу: контекст
 	// запроса там не годится (см. handlePrebuffer).
 	BaseCtx context.Context
@@ -184,6 +186,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case "/api/torrents":
 		s.handleTorrents(w, r)
+		return
+	case "/api/metrics":
+		s.handleMetrics(w, r)
 		return
 	}
 

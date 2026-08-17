@@ -28,6 +28,7 @@ import (
 	"github.com/avdav/torrent-media/server/internal/library"
 	"github.com/avdav/torrent-media/server/internal/media"
 	"github.com/avdav/torrent-media/server/internal/mediasource"
+	"github.com/avdav/torrent-media/server/internal/metrics"
 	"github.com/avdav/torrent-media/server/internal/reclaim"
 	"github.com/avdav/torrent-media/server/internal/subs"
 )
@@ -187,12 +188,52 @@ func main() {
 	})
 	go keeper.Run(ctx)
 
+	// Показания дашборда. Числа собираются здесь, а не в самих пакетах,
+	// по той же причине, по которой здесь собирается вся остальная проводка:
+	// сборщик не должен знать ни про hls, ни про библиотеку — он умеет читать
+	// /proc и statfs, а живые счётчики ему приносят замыкания.
+	collector := metrics.New(metrics.Options{
+		StoreDir: store,
+		HLSDir:   os.TempDir(),
+		Torrent: func() *metrics.Torrent {
+			src := lib.Current()
+			if src == nil || !src.Ready() {
+				return nil
+			}
+			st := src.Stats()
+			return &metrics.Torrent{
+				Name: src.Name(), Peers: st.Peers, DownloadSpeed: st.DownloadSpeed,
+				Downloaded: st.Downloaded, Progress: st.Progress,
+			}
+		},
+		Session: func() *metrics.Session {
+			snap := manager.ActiveSnapshot()
+			if snap == nil {
+				return nil
+			}
+			return &metrics.Session{
+				ID: snap.ID, State: snap.State, Index: snap.Index, Name: snap.Name,
+				Segments: snap.Segments, BytesOut: snap.BytesOut, StartedAt: snap.StartedAt,
+				VideoMode: snap.VideoMode, AudioMode: snap.AudioMode, PID: snap.FFmpegPID,
+			}
+		},
+		Reclaim: func() *metrics.Reclaim {
+			snap := keeper.Snapshot()
+			return &metrics.Reclaim{
+				MinFree: snap.MinFree, TargetFree: targetFree, Evicted: snap.Evicted,
+				EvictedBytes: snap.EvictedBytes, LastEvictedAt: snap.LastEvictedAt,
+			}
+		},
+	})
+	go collector.Run(ctx)
+
 	handler := httpapi.New(httpapi.Deps{
 		Library: lib,
 		Prober:  prober,
 		HLS:     manager,
 		Subs:    subtitles,
 		Disk:    keeper,
+		Metrics: collector,
 		BaseCtx: ctx,
 	})
 

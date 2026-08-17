@@ -1,62 +1,141 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Torrent Media Server</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Rhythm TV — control</title>
 <style>
-  body { margin:0; background:#101010; color:#eee; font-family:Arial,sans-serif; font-size:20px; }
-  .wrap { max-width:1100px; margin:0 auto; padding:22px; }
-  h1 { font-size:30px; margin:0 0 18px; }
-  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:12px 0; }
-  select, button, input { font-size:20px; padding:10px 14px; background:#222; color:#fff; border:1px solid #555; border-radius:6px; }
-  button:focus, select:focus, input:focus { outline:3px solid #ddd; }
-  #episode { min-width:520px; max-width:100%; }
-  video { display:block; width:100%; height:auto; max-height:65vh; background:#000; margin-top:16px; object-fit:contain; }
-  video:fullscreen,
-  video:-webkit-full-screen,
-  video:-moz-full-screen {
-    width:100vw !important;
-    height:100vh !important;
-    max-width:none !important;
-    max-height:none !important;
-    margin:0 !important;
-    object-fit:contain !important;
-    background:#000 !important;
+  /* Пульт, а не плеер. Страница открывается с телефона одной рукой, поэтому
+     вкладки внизу (большой палец не достаёт до верха), а любая кнопка не мельче
+     44 px. Видео здесь нет вовсе: телевизор играет сам, отсюда им управляют. */
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212a; --line:#252a36;
+    --text:#e6e9ef; --muted:#8b93a7;
+    --ok:#4ec97a; --warn:#f0b24a; --bad:#ef6461; --info:#5aa9e6; --alt:#a78bfa;
+    --tabs:64px;
   }
-  .grow { flex:1; }
-  .small { font-size:16px; color:#aaa; }
-  #seek { width:100%; box-sizing:border-box; }
-  #status { min-height:24px; color:#bbb; }
-  .statusbox { margin:14px 0; padding:14px 16px; background:#191919; border:1px solid #333; border-radius:8px; }
-  .statusline { margin:5px 0; }
-  .status-ok { color:#79d279; }
-  .status-warn { color:#ffd166; }
-  .status-bad { color:#ff7777; }
-  .status-muted { color:#aaa; }
-  .hidden { display:none; }
-  /* Библиотека — единственное, что делают с телефона, поэтому строки крупные
-     и с большими кнопками: попасть пальцем важнее, чем уместить всё на экран. */
-  .torrent { display:flex; gap:12px; align-items:center; flex-wrap:wrap;
-             margin:8px 0; padding:10px 12px; background:#151515; border:1px solid #333; border-radius:8px; }
-  .torrent.active { border-color:#79d279; }
-  .torrent .name { flex:1; min-width:200px; word-break:break-word; }
-  .torrent .badge { color:#79d279; white-space:nowrap; }
-  .danger { border-color:#803333; }
-  #torrentFile { flex:1; min-width:200px; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--text); }
+  body {
+    font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+    padding-bottom:calc(var(--tabs) + env(safe-area-inset-bottom));
+    -webkit-text-size-adjust:100%;
+  }
+  header {
+    display:flex; align-items:center; gap:10px;
+    padding:calc(10px + env(safe-area-inset-top)) 16px 10px;
+    border-bottom:1px solid var(--line); background:var(--panel);
+    position:sticky; top:0; z-index:5;
+  }
+  .brand { font-weight:600; letter-spacing:.02em; }
+  .brand small { display:block; font-weight:400; font-size:12px; color:var(--muted); }
+  .live { margin-left:auto; font-size:13px; color:var(--muted); display:flex; align-items:center; gap:7px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  .dot.ok { background:var(--ok); }
+  .dot.bad { background:var(--bad); }
+
+  main { max-width:900px; margin:0 auto; padding:14px 14px 24px; }
+  .screen { display:none; }
+  .screen.on { display:block; }
+
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; margin:0 0 12px; }
+  .panel h2 { margin:0 0 10px; font-size:13px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+  .muted { color:var(--muted); }
+  .small { font-size:13px; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .grow { flex:1; min-width:0; }
+  .hidden { display:none !important; }
+
+  button, input[type=file] { font:inherit; }
+  button {
+    min-height:44px; padding:0 16px; border-radius:10px; cursor:pointer;
+    background:var(--panel2); color:var(--text); border:1px solid var(--line);
+  }
+  button:active { background:#2a3040; }
+  button.primary { background:#22572f; border-color:#2f7a41; }
+  button.danger { background:#4a2020; border-color:#7a3030; }
+  button:disabled { opacity:.45; }
+  input[type=file] {
+    flex:1; min-width:160px; padding:10px; border-radius:10px;
+    background:var(--panel2); border:1px solid var(--line); color:var(--text);
+  }
+
+  /* Вкладки внизу: экраны переключают чаще всего, и до верха телефона
+     большим пальцем не дотянуться. */
+  nav.tabs {
+    position:fixed; left:0; right:0; bottom:0; z-index:6;
+    display:flex; background:var(--panel); border-top:1px solid var(--line);
+    padding-bottom:env(safe-area-inset-bottom);
+  }
+  nav.tabs button {
+    flex:1; height:var(--tabs); border:0; border-radius:0; background:transparent;
+    color:var(--muted); font-size:12px; letter-spacing:.04em;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;
+  }
+  nav.tabs button .glyph { font-size:19px; line-height:1; }
+  nav.tabs button.on { color:var(--text); box-shadow:inset 0 2px 0 var(--info); }
+
+  /* Библиотека: строки крупные, попасть пальцем важнее, чем уместить всё. */
+  .torrent { display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+             padding:12px; margin:8px 0; border:1px solid var(--line);
+             border-radius:10px; background:var(--panel2); }
+  .torrent.active { border-color:var(--ok); }
+  .torrent .name { flex:1; min-width:180px; word-break:break-word; }
+  .badge { color:var(--ok); white-space:nowrap; font-size:13px; }
+
+  .bar { height:10px; border-radius:5px; background:#2a3040; overflow:hidden; position:relative; margin:8px 0 6px; }
+  .bar span { display:block; height:100%; background:var(--ok); }
+  .bar span.warn { background:var(--warn); }
+  .bar span.bad { background:var(--bad); }
+
+  dl.kv { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; margin:0; }
+  dl.kv dt { color:var(--muted); font-size:13px; white-space:nowrap; }
+  dl.kv dd { margin:0; text-align:right; word-break:break-word; }
+
+  .chip { display:inline-block; padding:4px 12px; border-radius:999px; font-size:13px;
+          border:1px solid var(--line); background:var(--panel2); }
+  .chip.ok { color:var(--ok); border-color:#2f7a41; }
+  .chip.warn { color:var(--warn); border-color:#7a5c22; }
+  .chip.bad { color:var(--bad); border-color:#7a3030; }
+
+  .episode { font-size:19px; font-weight:600; margin:0 0 4px; word-break:break-word; }
+
+  .tiles { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin:0 0 12px; }
+  @media (min-width:620px) { .tiles { grid-template-columns:repeat(4,1fr); } }
+  .tile { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; }
+  .tile .label { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+  .tile .value { font-size:22px; font-weight:600; margin-top:4px; white-space:nowrap;
+                 overflow:hidden; text-overflow:ellipsis; font-variant-numeric:tabular-nums; }
+  .tile .sub { font-size:12px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+  .chart-head { display:flex; align-items:baseline; gap:10px; }
+  .chart-head .title { font-size:13px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
+  .chart-head .now { margin-left:auto; font-variant-numeric:tabular-nums; }
+  canvas { display:block; width:100%; height:84px; margin-top:8px; }
+  .chart-foot { display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin-top:2px; }
+
+  .empty { text-align:center; color:var(--muted); padding:26px 10px; }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1 id="title">Torrent Media Server</h1>
+<header>
+  <div class="brand">Rhythm TV<small id="activeName">library…</small></div>
+  <div class="live"><span class="dot" id="liveDot"></span><span id="liveText">connecting</span></div>
+</header>
 
-  <div class="statusbox">
-    <div class="row">
-      <strong>Torrents</strong>
-      <span id="libraryActive" class="grow small">…</span>
-      <button id="libToggle">Show</button>
+<main>
+  <section class="screen" id="screen-torrents">
+    <div class="panel">
+      <h2>Storage</h2>
+      <div class="bar"><span id="storeBar" style="width:0"></span></div>
+      <div class="small muted" id="storeLine">measuring…</div>
+      <div class="small muted" id="storeEvicted"></div>
     </div>
-    <div id="libraryPanel" class="hidden">
+
+    <div class="panel">
+      <h2>Add a torrent</h2>
       <div class="row">
         <!-- accept НЕ ставится сознательно. iOS сопоставляет его с UTI, а для
              .torrent и application/x-bittorrent их нет: Safari показывает
@@ -64,751 +143,747 @@
              любой файл, а проверку всё равно делает сервер — он разбирает
              метаинформацию до записи на диск. -->
         <input id="torrentFile" type="file">
-        <button id="uploadBtn">Upload</button>
+        <button class="primary" id="uploadBtn">Upload</button>
       </div>
-      <div class="small">Any file works — the server checks that it is a real .torrent.</div>
-      <div id="libraryStatus" class="small"></div>
-      <div id="libraryStorage" class="small"></div>
+      <div class="small muted">Any file works — the server checks that it is a real .torrent.</div>
+      <div class="small" id="libraryStatus"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Library</h2>
       <div id="torrentList"></div>
     </div>
-  </div>
+  </section>
 
-  <div class="row">
-    <button id="prev">◀ Previous</button>
-    <select id="episode" class="grow"></select>
-    <button id="next">Next ▶</button>
-  </div>
+  <section class="screen" id="screen-session">
+    <div class="panel" id="sessionPanel">
+      <h2>Playing on the TV</h2>
+      <div id="sessionBody"><div class="empty">loading…</div></div>
+    </div>
 
-  <div class="row">
-    <label>Audio <select id="audio"></select></label>
-    <label>Subtitles <select id="sub"><option value="off">Off</option></select></label>
-    <label><input id="autonext" type="checkbox"> Auto next</label>
-    <button id="play">▶ Play</button>
-  </div>
+    <div class="panel">
+      <h2>Torrent</h2>
+      <dl class="kv" id="torrentStats"><dt>state</dt><dd class="muted">…</dd></dl>
+    </div>
 
-  <div class="statusbox">
-    <div class="statusline"><strong>Status:</strong> <span id="humanStatus">Starting server status…</span></div>
-    <div class="statusline small" id="torrentStatus">Torrent: checking…</div>
-    <div class="statusline small" id="playerStatus">Player: idle</div>
-  </div>
+    <div class="panel">
+      <h2>Actions</h2>
+      <div class="row">
+        <button class="danger" id="stopBtn">Stop the session</button>
+        <span class="small muted grow" id="stopHint">Kills ffmpeg. The TV drops back to its menu.</span>
+      </div>
+      <div class="small" id="actionStatus"></div>
+    </div>
+  </section>
 
-  <video id="video" controls playsinline></video>
+  <section class="screen" id="screen-metrics">
+    <div class="tiles" id="tiles"></div>
+    <div id="charts"></div>
+    <div class="panel">
+      <h2>Server process</h2>
+      <dl class="kv" id="runtimeStats"></dl>
+    </div>
+  </section>
+</main>
 
-  <div class="row">
-    <button id="back30">−30s</button>
-    <input id="seek" class="grow" type="range" min="0" max="1" step="1" value="0">
-    <button id="forward30">+30s</button>
-  </div>
-  <div class="row small">
-    <span id="clock">00:00 / 00:00</span>
-    <span id="status" class="grow"></span>
-  </div>
-</div>
+<nav class="tabs">
+  <button data-screen="torrents"><span class="glyph">⇩</span>Torrents</button>
+  <button data-screen="session"><span class="glyph">▶</span>Session</button>
+  <button data-screen="metrics"><span class="glyph">▦</span>Metrics</button>
+</nav>
+
 <script>
 (function () {
-  var episodes = [];
-  var meta = null;
-  var currentIndex = null;
-  var startOffset = 0;
-  var saveTimer = 0;
-  var prebufferedFor = null;
-  var isPlaying = false;
+  'use strict';
 
-  var episode = document.getElementById('episode');
-  var audio = document.getElementById('audio');
-  var sub = document.getElementById('sub');
-  var autonext = document.getElementById('autonext');
-  var video = document.getElementById('video');
-  var seek = document.getElementById('seek');
-  var clock = document.getElementById('clock');
-  var status = document.getElementById('status');
-  var humanStatus = document.getElementById('humanStatus');
-  var torrentStatus = document.getElementById('torrentStatus');
-  var playerStatus = document.getElementById('playerStatus');
-  var lastServerStatus = null;
-  var browserState = 'idle';
-  var libraryPanel = document.getElementById('libraryPanel');
-  var libraryStatus = document.getElementById('libraryStatus');
-  var libraryStorage = document.getElementById('libraryStorage');
-  var libraryActive = document.getElementById('libraryActive');
-  var torrentList = document.getElementById('torrentList');
-  var torrentFile = document.getElementById('torrentFile');
-  /* Имя активного торрента: под ним хранятся позиции просмотра. */
-  var torrentKey = '';
+  /* Эта страница живёт в телефонном браузере, а не в WRT телевизора,
+     поэтому ограничение «строго ES5» из client/js/app.js сюда НЕ относится:
+     там оно физическое (код просто не запустится), здесь его нет. */
 
-  function setFullscreenSizing(on) {
-    if (on) {
-      video.style.width = '100vw';
-      video.style.height = '100vh';
-      video.style.maxWidth = 'none';
-      video.style.maxHeight = 'none';
-      video.style.margin = '0';
-      video.style.objectFit = 'contain';
-    } else {
-      video.style.width = '100%';
-      video.style.height = 'auto';
-      video.style.maxWidth = '';
-      video.style.maxHeight = '65vh';
-      video.style.margin = '16px 0 0';
-      video.style.objectFit = 'contain';
+  /* Сервер публикуется наружу reverse-proxy под путём с токеном (…/<токен>/…),
+     и этот префикс прокси срезает. Страница же ходила бы по корневым путям
+     вида /api/status — мимо префикса, то есть мимо прокси: снаружи это 404
+     на каждом запросе, хотя сервер жив. Поэтому префикс подставляется сам:
+     страница отдаётся только на «/», значит всё, что стоит в пути до неё,
+     и есть он. То же касается любых путей из ответов сервера — они тоже
+     корневые. */
+  const proxyBase = location.pathname.replace(/\/+$/, '');
+  function apiUrl(path) { return proxyBase + path; }
+
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    /* textContent, а не innerHTML: сюда приезжают имена из .torrent, то есть
+       из файла, который кто-то загрузил. */
+    if (text !== undefined) n.textContent = text;
+    return n;
+  };
+
+  let online = null;
+  function setLive(ok, text) {
+    if (online !== ok) {
+      online = ok;
+      $('liveDot').className = 'dot ' + (ok ? 'ok' : 'bad');
     }
+    $('liveText').textContent = text;
   }
 
-  function syncFullscreenSizing() {
-    var fs = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
-    setFullscreenSizing(fs === video || !!document.webkitIsFullScreen || !!document.mozFullScreen);
-  }
-
-  if (document.addEventListener) {
-    document.addEventListener('fullscreenchange', syncFullscreenSizing, false);
-    document.addEventListener('webkitfullscreenchange', syncFullscreenSizing, false);
-    document.addEventListener('mozfullscreenchange', syncFullscreenSizing, false);
-  }
-  video.addEventListener('webkitbeginfullscreen', function () { setFullscreenSizing(true); }, false);
-  video.addEventListener('webkitendfullscreen', function () { setFullscreenSizing(false); }, false);
-
-  function get(key, fallback) {
+  async function api(path, init) {
+    let res;
     try {
-      var v = localStorage.getItem(key);
-      return v === null ? fallback : v;
-    } catch (e) { return fallback; }
-  }
-
-  function set(key, value) {
-    try { localStorage.setItem(key, String(value)); } catch (e) {}
-  }
-
-  /* Позиции и последняя серия хранятся ПО ТОРРЕНТУ: индекс файла сам по себе
-     ничего не значит, как только торрентов стало больше одного — тот же
-     индекс в другом торренте это другая серия. Ключ — имя торрента
-     из /api/files. Старый плоский формат подбирается на лету и относится
-     к тому торренту, который на тот момент был единственным. */
-  function readJson(key) {
-    try { return JSON.parse(get(key, '{}')); } catch (e) { return {}; }
-  }
-
-  function writeJson(key, value) {
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
-  }
-
-  /* {торрент: {индекс: секунды}}; старый формат — плоское {индекс: секунды}. */
-  function allPositions() {
-    var data = readJson('tms.positions'), k;
-    if (!data || typeof data !== 'object') return {};
-    for (k in data) {
-      if (!Object.prototype.hasOwnProperty.call(data, k)) continue;
-      if (data[k] === null || typeof data[k] !== 'object') {
-        var wrapped = {};
-        if (torrentKey) wrapped[torrentKey] = data;
-        writeJson('tms.positions', wrapped);
-        return wrapped;
-      }
+      res = await fetch(apiUrl(path), init);
+    } catch (e) {
+      setLive(false, 'server unreachable');
+      throw e;
+    }
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* тело может быть пустым */ }
+    if (!res.ok) {
+      const err = new Error((data && data.error) || ('HTTP ' + res.status));
+      err.status = res.status;
+      setLive(true, 'server error');
+      throw err;
     }
     return data;
   }
 
-  /* {торрент: индекс}; старый формат — просто число. */
-  function allLastEpisodes() {
-    var data = readJson('tms.lastEpisode');
-    if (data !== null && typeof data === 'object') return data;
-    var wrapped = {};
-    if (torrentKey && typeof data === 'number') wrapped[torrentKey] = data;
-    writeJson('tms.lastEpisode', wrapped);
-    return wrapped;
-  }
-
-  function positions() {
-    return allPositions()[torrentKey] || {};
-  }
-
-  function savePositions(p) {
-    var all = allPositions();
-    all[torrentKey] = p;
-    writeJson('tms.positions', all);
-  }
-
-  function savePosition(value) {
-    if (currentIndex === null) return;
-    var p = positions();
-    p[String(currentIndex)] = Math.max(0, Math.floor(value));
-    savePositions(p);
-  }
-
-  function clearPosition(index) {
-    var p = positions();
-    delete p[String(index)];
-    savePositions(p);
-  }
-
-  function lastEpisode(fallback) {
-    var v = allLastEpisodes()[torrentKey];
-    return typeof v === 'number' ? v : fallback;
-  }
-
-  function saveLastEpisode(index) {
-    var all = allLastEpisodes();
-    all[torrentKey] = Number(index);
-    writeJson('tms.lastEpisode', all);
-  }
-
-  /* Сервер публикуется наружу reverse-proxy под путём с токеном
-     (…/<токен>/…), и этот префикс прокси срезает. Страница же ходит
-     по корневым путям вида /api/status — мимо префикса, то есть мимо
-     прокси: снаружи это 404 на каждом запросе, хотя сервер жив.
-     Поэтому префикс подставляется сам. Сервер отдаёт эту страницу
-     только на «/», значит всё, что стоит в пути до неё, и есть префикс. */
-  var proxyBase = location.pathname.replace(/\/+$/, '');
-
-  function apiUrl(path) {
-    return proxyBase + path;
-  }
-
-  function xhrJson(url, callback) {
-    var x = new XMLHttpRequest();
-    x.open('GET', url, true);
-    x.onreadystatechange = function () {
-      if (x.readyState !== 4) return;
-      if (x.status >= 200 && x.status < 300) {
-        try { callback(null, JSON.parse(x.responseText)); }
-        catch (e) { callback(e); }
-      } else callback(new Error('HTTP ' + x.status));
-    };
-    x.send();
-  }
-
-  function ping(url) {
-    var x = new XMLHttpRequest();
-    x.open('GET', url, true);
-    x.send();
-  }
-
-  function postJson(url, body, callback) {
-    var x = new XMLHttpRequest();
-    x.open('POST', url, true);
-    x.onreadystatechange = function () {
-      if (x.readyState !== 4) return;
-      var parsed = null;
-      try { parsed = JSON.parse(x.responseText); } catch (e) {}
-      if (x.status >= 200 && x.status < 300) callback(null, parsed);
-      else callback(new Error((parsed && parsed.error) || ('HTTP ' + x.status)));
-    };
-    /* Файл уходит телом как есть: multipart тут ничего не даёт, а сервер
-       принимает оба варианта. */
-    x.send(body);
-  }
-
-  function fmt(seconds) {
-    seconds = Math.max(0, Math.floor(seconds || 0));
-    var h = Math.floor(seconds / 3600);
-    var m = Math.floor((seconds % 3600) / 60);
-    var s = seconds % 60;
-    if (h) return h + ':' + (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
-    return m + ':' + (s < 10 ? '0' : '') + s;
-  }
+  /* ── Форматирование ─────────────────────────────────────────────────── */
 
   function fmtBytes(bytes) {
-    bytes = Number(bytes || 0);
-    if (bytes < 1024) return Math.round(bytes) + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
-    return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+    /* null проверяется отдельно: Number(null) это ноль, и «не измерено»
+       превратилось бы в честный на вид «0 B». */
+    if (bytes === null || bytes === undefined) return '—';
+    const n = Number(bytes);
+    if (!isFinite(n) || n < 0) return '—';
+    if (n < 1024) return Math.round(n) + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+    if (n < 1099511627776) return (n / 1073741824).toFixed(2) + ' GB';
+    return (n / 1099511627776).toFixed(2) + ' TB';
   }
-
-  function fmtSpeed(bytes) {
-    return fmtBytes(bytes) + '/s';
+  const fmtRate = (b) => (b === null || b === undefined ? '—' : fmtBytes(b) + '/s');
+  function fmtPct(v, digits) {
+    if (v === null || v === undefined || !isFinite(v)) return '—';
+    return v.toFixed(digits === undefined ? 0 : digits) + '%';
   }
-
-  function setHumanStatus(text, cls) {
-    humanStatus.textContent = text;
-    humanStatus.className = cls || '';
+  function fmtTime(seconds) {
+    if (seconds === null || seconds === undefined || !isFinite(seconds)) return '—';
+    const s = Math.max(0, Math.floor(seconds));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+    const pad = (x) => (x < 10 ? '0' + x : String(x));
+    return h ? h + ':' + pad(m) + ':' + pad(r) : m + ':' + pad(r);
   }
-
-  function refreshHumanStatus() {
-    var s = lastServerStatus;
-    if (!s || !s.ready) {
-      setHumanStatus('Loading torrent metadata…', 'status-warn');
-      return;
-    }
-    if (s.playback && s.playback.state === 'error') {
-      setHumanStatus('Playback failed — ffmpeg returned an error.', 'status-bad');
-      return;
-    }
-    if (browserState === 'error') {
-      setHumanStatus('Browser could not play the stream.', 'status-bad');
-      return;
-    }
-    if (s.peers === 0) {
-      setHumanStatus('No torrent peers yet — waiting for sources.', 'status-warn');
-      return;
-    }
-    if (browserState === 'playing') {
-      setHumanStatus('Playing normally.', 'status-ok');
-      return;
-    }
-    if (browserState === 'waiting' || browserState === 'stalled') {
-      if (s.downloadSpeed > 0) setHumanStatus('Buffering — torrent data is arriving, please wait.', 'status-warn');
-      else setHumanStatus('Buffering — connected to peers, but no data is arriving right now.', 'status-warn');
-      return;
-    }
-    if (s.playback && (s.playback.state === 'preparing' || s.playback.state === 'buffering')) {
-      if (s.downloadSpeed > 0) setHumanStatus('Preparing Samsung-compatible HLS — generating startup segments…', 'status-warn');
-      else setHumanStatus('Preparing HLS — waiting for required torrent pieces…', 'status-warn');
-      return;
-    }
-    if (s.playback && (s.playback.state === 'ready' || s.playback.state === 'finished') && s.playback.bytesOut > 0) {
-      setHumanStatus('HLS segments are ready; browser is opening the native TV stream.', 'status-warn');
-      return;
-    }
-    if (isPlaying) {
-      setHumanStatus('Starting playback…', 'status-warn');
-      return;
-    }
-    setHumanStatus('Ready.', 'status-ok');
+  function fmtAgo(ms) {
+    if (!ms) return '—';
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's ago';
+    return fmtTime(s) + ' ago';
   }
-
-  function pollServerStatus() {
-    xhrJson(apiUrl('/api/status') + '?_=' + Date.now(), function (err, s) {
-      if (err) {
-        torrentStatus.textContent = 'Torrent: status request failed: ' + err.message;
-        torrentStatus.className = 'statusline small status-bad';
-        setHumanStatus('Cannot reach the media server.', 'status-bad');
-        return;
-      }
-      lastServerStatus = s;
-      if (!s.ready) {
-        torrentStatus.textContent = 'Torrent: loading metadata…';
-        torrentStatus.className = 'statusline small status-warn';
-      } else {
-        torrentStatus.textContent = 'Torrent: ' + s.peers + ' peers · ' + fmtSpeed(s.downloadSpeed) + ' · ' + fmtBytes(s.downloaded) + ' received · total torrent ' + (Number(s.progress || 0) * 100).toFixed(2) + '%';
-        torrentStatus.className = 'statusline small ' + (s.peers > 0 ? 'status-ok' : 'status-warn');
-      }
-      if (!s.playback) {
-        playerStatus.textContent = 'Player: idle';
-        playerStatus.className = 'statusline small status-muted';
-      } else {
-        var pb = s.playback;
-        var age = Math.max(0, Math.floor((Date.now() - pb.startedAt) / 1000));
-        var extra = pb.bytesOut ? ' · ' + fmtBytes(pb.bytesOut) + ' produced · ' + (pb.segments || 0) + ' HLS segments' : '';
-        if (typeof pb.downloadedSinceStart === 'number') extra += ' · ' + fmtBytes(pb.downloadedSinceStart) + ' downloaded for this playback';
-        if (pb.lastOutputAt) extra += ' · last output ' + Math.max(0, Math.floor((Date.now() - pb.lastOutputAt) / 1000)) + 's ago';
-        playerStatus.textContent = 'Player: ' + pb.state + ' · episode [' + pb.index + '] · audio=' + pb.audio + ' · subtitles=' + pb.sub +
-          ' · video ' + (pb.videoMode || '?') + '/audio ' + (pb.audioMode || '?') + ' · ' + age + 's' + extra;
-        playerStatus.className = 'statusline small ' + (pb.state === 'error' ? 'status-bad' : ((pb.state === 'ready' || pb.state === 'finished') ? 'status-ok' : 'status-warn'));
-      }
-      refreshHumanStatus();
-    });
-  }
-
-  function absoluteTime() {
-    return startOffset + (isFinite(video.currentTime) ? video.currentTime : 0);
-  }
-
-  function option(select, value, label) {
-    var o = document.createElement('option');
-    o.value = value;
-    o.textContent = label;
-    select.appendChild(o);
-  }
-
-  function pickValue(select, preferred) {
-    var i;
-    for (i = 0; i < select.options.length; i++) {
-      if (select.options[i].value === preferred) {
-        select.selectedIndex = i;
-        return true;
-      }
-    }
-    return false;
-  }
-
-  function populateTracks() {
-    var preferredAudio = get('tms.audio', 'rus');
-    var preferredSub = get('tms.sub', 'off');
-    var i;
-
-    audio.innerHTML = '';
-    for (i = 0; i < meta.audio.length; i++) {
-      option(audio, meta.audio[i].code, meta.audio[i].label + (meta.audio[i].codec ? ' (' + meta.audio[i].codec + ')' : ''));
-    }
-    if (!pickValue(audio, preferredAudio) && audio.options.length) audio.selectedIndex = 0;
-
-    sub.innerHTML = '';
-    option(sub, 'off', 'Off');
-    for (i = 0; i < meta.subtitles.length; i++) {
-      option(sub, meta.subtitles[i].code, meta.subtitles[i].label + (meta.subtitles[i].codec ? ' (' + meta.subtitles[i].codec + ')' : ''));
-    }
-    if (!pickValue(sub, preferredSub)) sub.value = 'off';
-  }
-
-  function updateClock() {
-    var now = absoluteTime();
-    var total = meta ? meta.duration : 0;
-    clock.textContent = fmt(now) + ' / ' + fmt(total);
-    if (total > 0) {
-      seek.max = Math.max(1, Math.floor(total));
-      if (!seek.matches || !seek.matches(':active')) seek.value = Math.min(total, now);
-    }
-
-    if (meta && meta.next !== null && total > 0 && total - now < 90 && prebufferedFor !== meta.next) {
-      prebufferedFor = meta.next;
-      ping(apiUrl('/api/prebuffer/' + meta.next));
-      // Also probe the next episode so language matching is ready.
-      ping(apiUrl('/api/probe/' + meta.next));
+  function kv(list, pairs) {
+    list.innerHTML = '';
+    for (const [key, value, cls] of pairs) {
+      list.appendChild(el('dt', '', key));
+      list.appendChild(el('dd', cls || '', value));
     }
   }
 
-  function waitForHls(sessionId, playlist, automatic) {
-    xhrJson(apiUrl('/api/hls-status/' + encodeURIComponent(sessionId)) + '?_=' + Date.now(), function (err, s) {
-      if (err) {
-        status.textContent = 'HLS status failed: ' + err.message;
-        browserState = 'error';
-        refreshHumanStatus();
-        return;
-      }
-      if (s.state === 'error') {
-        status.textContent = 'HLS preparation failed.';
-        browserState = 'error';
-        refreshHumanStatus();
-        return;
-      }
-      // Сеанс остановлен или заменён более новым /api/start: его сегменты ещё
-      // лежат на диске, но открывать их нельзя. Молча выходим — экраном
-      // распоряжается тот опрос, который заменил этот.
-      if (s.state === 'stopped' || s.state === 'replaced') return;
-      if (s.segments >= 2 || s.state === 'finished') {
-        status.textContent = 'Opening Samsung-compatible HLS stream…';
-        browserState = 'loading';
-        video.src = apiUrl(playlist) + '?_=' + Date.now();
-        video.load();
-        isPlaying = true;
-        var p = video.play();
-        if (p && p.catch) p.catch(function () {
-          if (automatic) status.textContent = 'Press Play on the remote to continue.';
-        });
-        return;
-      }
-      status.textContent = 'Preparing HLS: ' + (s.segments || 0) + '/2 startup segments…';
-      browserState = 'waiting';
-      refreshHumanStatus();
-      setTimeout(function () { waitForHls(sessionId, playlist, automatic); }, 700);
-    });
-  }
+  /* ── Экраны ─────────────────────────────────────────────────────────── */
 
-  function playFrom(seconds, automatic) {
-    if (!meta) return;
-    seconds = Math.max(0, Math.min(seconds || 0, Math.max(0, meta.duration - 1)));
-    startOffset = seconds;
-    prebufferedFor = null;
-    set('tms.autonext', autonext.checked ? '1' : '0');
+  const SCREENS = ['torrents', 'session', 'metrics'];
 
-    video.pause();
-    video.removeAttribute('src');
-    video.load();
-    status.textContent = 'Starting Samsung-compatible HLS…';
-    browserState = 'starting';
-    refreshHumanStatus();
-
-    var startUrl = apiUrl('/api/start/' + currentIndex) + '?audio=' + encodeURIComponent(audio.value || '') +
-      '&sub=' + encodeURIComponent(sub.value || 'off') + '&start=' + encodeURIComponent(seconds.toFixed(3)) + '&_=' + Date.now();
-    xhrJson(startUrl, function (err, data) {
-      if (err) {
-        status.textContent = 'Cannot start HLS: ' + err.message;
-        browserState = 'error';
-        refreshHumanStatus();
-        return;
-      }
-      waitForHls(data.id, data.playlist, automatic);
-    });
-  }
-
-  function loadEpisode(index, automatic) {
-    index = Number(index);
-    currentIndex = index;
-    saveLastEpisode(index);
-    episode.value = String(index);
-    status.textContent = 'Reading tracks...';
-    browserState = 'probing';
-    refreshHumanStatus();
-    video.pause();
-    video.removeAttribute('src');
-    video.load();
-    isPlaying = false;
-
-    xhrJson(apiUrl('/api/probe/' + index), function (err, data) {
-      if (err) {
-        status.textContent = 'Probe failed: ' + err.message;
-        return;
-      }
-      meta = data;
-      document.getElementById('title').textContent = data.name;
-      populateTracks();
-      var saved = Number(positions()[String(index)] || 0);
-      if (saved > 10 && (!data.duration || saved < data.duration - 30)) startOffset = saved;
-      else startOffset = 0;
-      seek.max = Math.max(1, Math.floor(data.duration || 1));
-      seek.value = Math.floor(startOffset);
-      updateClock();
-      status.textContent = 'Ready';
-      browserState = 'idle';
-      refreshHumanStatus();
-      if (automatic) playFrom(0, true);
-    });
-  }
-
-  function goNext(automatic) {
-    if (!meta || meta.next === null) return;
-    clearPosition(currentIndex);
-    loadEpisode(meta.next, automatic);
-  }
-
-  function goPrev() {
-    if (!meta || meta.prev === null) return;
-    loadEpisode(meta.prev, false);
-  }
-
-  episode.onchange = function () { loadEpisode(Number(episode.value), false); };
-  document.getElementById('prev').onclick = goPrev;
-  document.getElementById('next').onclick = function () { goNext(false); };
-  document.getElementById('play').onclick = function () { playFrom(startOffset || Number(seek.value) || 0, false); };
-
-  audio.onchange = function () {
-    set('tms.audio', audio.value);
-    if (isPlaying) playFrom(absoluteTime(), false);
+  /* Экран держится в hash, а не только в памяти: так на дашборд можно положить
+     закладку, и так же работает кнопка «назад» браузера — на телефоне её жмут
+     рефлекторно, и без этого она уводила бы со страницы целиком. Выбор
+     дублируется в localStorage: адрес без hash должен открыть тот экран,
+     на котором ушли. */
+  const screenFromHash = () => {
+    const name = location.hash.replace(/^#/, '');
+    return SCREENS.indexOf(name) >= 0 ? name : null;
   };
+  let screen = screenFromHash() || localStorage.getItem('tms.screen');
+  if (SCREENS.indexOf(screen) < 0) screen = 'torrents';
 
-  sub.onchange = function () {
-    set('tms.sub', sub.value);
-    if (isPlaying) playFrom(absoluteTime(), false);
-  };
-
-  autonext.onchange = function () { set('tms.autonext', autonext.checked ? '1' : '0'); };
-
-  document.getElementById('back30').onclick = function () { playFrom(Math.max(0, absoluteTime() - 30), false); };
-  document.getElementById('forward30').onclick = function () { playFrom(Math.min(meta ? meta.duration - 1 : 0, absoluteTime() + 30), false); };
-
-  seek.onchange = function () { playFrom(Number(seek.value) || 0, false); };
-
-  video.addEventListener('loadstart', function () { browserState = 'loading'; status.textContent = 'Loading stream…'; refreshHumanStatus(); });
-  video.addEventListener('loadedmetadata', function () { browserState = 'metadata'; status.textContent = 'Video metadata received…'; refreshHumanStatus(); });
-  video.addEventListener('canplay', function () { browserState = 'canplay'; status.textContent = 'Enough data to start…'; refreshHumanStatus(); });
-  video.addEventListener('playing', function () { status.textContent = ''; isPlaying = true; browserState = 'playing'; refreshHumanStatus(); });
-  video.addEventListener('waiting', function () { status.textContent = 'Buffering…'; browserState = 'waiting'; refreshHumanStatus(); });
-  video.addEventListener('stalled', function () { status.textContent = 'Stream stalled…'; browserState = 'stalled'; refreshHumanStatus(); });
-  video.addEventListener('pause', function () { if (!video.ended && browserState === 'playing') { browserState = 'paused'; refreshHumanStatus(); } });
-  video.addEventListener('error', function () {
-    var code = video.error ? video.error.code : 0;
-    status.textContent = 'Playback error' + (code ? ' (code ' + code + ')' : '') + '.';
-    browserState = 'error';
-    refreshHumanStatus();
-  });
-  video.addEventListener('timeupdate', function () {
-    updateClock();
-    var now = absoluteTime();
-    var t = Date.now();
-    if (t - saveTimer > 5000) {
-      saveTimer = t;
-      savePosition(now);
+  function showScreen(name) {
+    screen = name;
+    try { localStorage.setItem('tms.screen', name); } catch (e) { /* приватный режим */ }
+    if (location.hash !== '#' + name) location.hash = name;
+    for (const s of SCREENS) $('screen-' + s).className = 'screen' + (s === name ? ' on' : '');
+    for (const b of document.querySelectorAll('nav.tabs button')) {
+      b.className = b.dataset.screen === name ? 'on' : '';
     }
-  });
-  video.addEventListener('ended', function () {
-    isPlaying = false;
-    browserState = 'ended';
-    clearPosition(currentIndex);
-    if (autonext.checked && meta && meta.next !== null) goNext(true);
-    else status.textContent = 'Episode finished';
+    /* Экран открыт — показания на нём должны быть свежими сразу, а не через
+       такт опроса. Дашборду при этом нужна вся история: она рисуется один раз
+       и дальше дополняется точками из обычных ответов. */
+    if (name === 'torrents') loadTorrents();
+    if (name === 'session') pollStatus();
+    if (name === 'metrics') { needHistory = true; pollMetrics(); }
+  }
+
+  for (const b of document.querySelectorAll('nav.tabs button')) {
+    b.onclick = () => showScreen(b.dataset.screen);
+  }
+  window.addEventListener('hashchange', () => {
+    const name = screenFromHash();
+    if (name && name !== screen) showScreen(name);
   });
 
-  /* ── Библиотека торрентов ─────────────────────────────────────────────
-     Отсюда торренты закачивают с телефона и отсюда же выбирают активный.
-     Активен всегда один, и это ровно тот, который видит телевизор. */
+  /* ── Экран 1: торренты ──────────────────────────────────────────────── */
+
+  let activeTorrentName = '';
 
   function setLibraryStatus(text, cls) {
-    libraryStatus.textContent = text || '';
-    libraryStatus.className = 'small ' + (cls || '');
+    $('libraryStatus').textContent = text || '';
+    $('libraryStatus').className = 'small ' + (cls || '');
   }
 
   function torrentRow(entry) {
-    var row = document.createElement('div');
-    row.className = 'torrent' + (entry.active ? ' active' : '');
-
-    var name = document.createElement('div');
-    name.className = 'name';
-    /* textContent, а не innerHTML: имя приходит из .torrent, то есть
-       из файла, который сюда кто-то загрузил. */
-    name.textContent = entry.name;
-    var meta = document.createElement('div');
-    meta.className = 'small';
-    meta.textContent = fmtBytes(entry.length) + ' · ' + entry.files + ' files';
-    name.appendChild(meta);
+    const row = el('div', 'torrent' + (entry.active ? ' active' : ''));
+    const name = el('div', 'name', entry.name);
+    name.appendChild(el('div', 'small muted',
+      fmtBytes(entry.length) + ' · ' + entry.files + ' files'));
     row.appendChild(name);
 
     if (entry.active) {
-      var badge = document.createElement('span');
-      badge.className = 'badge';
-      badge.textContent = '● on air';
-      row.appendChild(badge);
+      row.appendChild(el('span', 'badge', '● on air'));
     } else {
-      var play = document.createElement('button');
-      play.textContent = 'Watch this';
-      play.onclick = function () { activateTorrent(entry); };
+      const play = el('button', 'primary', 'Watch this');
+      play.onclick = () => activateTorrent(entry);
       row.appendChild(play);
     }
 
-    var drop = document.createElement('button');
-    drop.className = 'danger';
-    drop.textContent = '✕';
+    const drop = el('button', 'danger', '✕');
     drop.title = 'Remove from library';
-    drop.onclick = function () { deleteTorrent(entry); };
+    drop.onclick = () => deleteTorrent(entry);
     row.appendChild(drop);
-
     return row;
   }
 
-  /* Место под скачанное. Сервер сам выселяет старое, когда его становится
-     мало, — строка нужна затем, чтобы «серия куда-то делась» имела видимое
-     объяснение, а порог не приходилось выяснять по логам. */
+  /* Место под скачанное. Сервер сам выселяет старое, когда его становится мало;
+     полоса нужна затем, чтобы у «серия куда-то делась» было видимое объяснение,
+     а порог не приходилось выяснять по логам. Шкала строится от порога чистки,
+     а не от размера диска: решение принимается по нему, и именно расстояние
+     до него имеет смысл. */
   function renderStorage(storage) {
+    const line = $('storeLine'), bar = $('storeBar'), evicted = $('storeEvicted');
     if (!storage) {
-      libraryStorage.textContent = '';
+      line.textContent = 'cleanup is off';
+      bar.style.width = '0';
+      evicted.textContent = '';
       return;
     }
     /* -1 означает «не смогли измерить»: ноль был бы законным показанием. */
-    var parts = [storage.free < 0 ? 'Free space unknown' : 'Free ' + fmtBytes(storage.free)];
-    parts.push(storage.minFree > 0
-      ? 'cleanup below ' + fmtBytes(storage.minFree)
-      : 'auto-cleanup off');
-    if (storage.evicted > 0) {
-      parts.push('reclaimed ' + storage.evicted + ' file(s), ' + fmtBytes(storage.evictedBytes));
-    }
-    libraryStorage.textContent = parts.join(' · ');
-    libraryStorage.className = 'small ' +
-      (storage.minFree > 0 && storage.free >= 0 && storage.free < storage.minFree ? 'status-warn' : '');
+    const free = storage.free;
+    const min = storage.minFree;
+    const scale = Math.max(free, min * 2, 1);
+    bar.style.width = free < 0 ? '0' : Math.min(100, (free / scale) * 100).toFixed(1) + '%';
+    bar.className = free < 0 || min <= 0 ? '' : (free < min ? 'bad' : (free < min * 1.5 ? 'warn' : ''));
+    line.textContent = (free < 0 ? 'Free space unknown' : 'Free ' + fmtBytes(free)) + ' · ' +
+      (min > 0 ? 'eviction starts below ' + fmtBytes(min) : 'auto-cleanup off');
+    evicted.textContent = storage.evicted > 0
+      ? 'reclaimed ' + storage.evicted + ' file(s), ' + fmtBytes(storage.evictedBytes)
+      : '';
   }
 
   function renderTorrents(data) {
-    var list = (data && data.torrents) || [];
-    var active = null;
+    const list = (data && data.torrents) || [];
     renderStorage(data && data.storage);
-    torrentList.innerHTML = '';
-    for (var i = 0; i < list.length; i++) {
-      if (list[i].active) active = list[i];
-      torrentList.appendChild(torrentRow(list[i]));
+    const box = $('torrentList');
+    box.innerHTML = '';
+    let active = null;
+    for (const entry of list) {
+      if (entry.active) active = entry;
+      box.appendChild(torrentRow(entry));
     }
-    if (active) {
-      libraryActive.textContent = 'on air: ' + active.name;
-    } else {
-      /* Раскрывается сама: пока торрент не выбран, плеер всё равно пуст
-         (/api/files отвечает 503), а починка — здесь же, одной кнопкой. */
-      libraryActive.textContent = list.length ? 'nothing selected' : 'library is empty — upload a .torrent';
-      setLibraryVisible(true);
+    if (!list.length) {
+      box.appendChild(el('div', 'empty', 'Library is empty — upload a .torrent above.'));
+    }
+    activeTorrentName = active ? active.name : '';
+    $('activeName').textContent = active ? active.name : (list.length ? 'nothing selected' : 'library is empty');
+  }
+
+  async function loadTorrents() {
+    try {
+      renderTorrents(await api('/api/torrents'));
+      setLive(true, 'live');
+    } catch (e) {
+      setLibraryStatus('Cannot load the torrent list: ' + e.message, 'bad');
     }
   }
 
-  function loadTorrents() {
-    xhrJson(apiUrl('/api/torrents') + '?_=' + Date.now(), function (err, data) {
-      if (err) {
-        setLibraryStatus('Cannot load the torrent list: ' + err.message, 'status-bad');
-        return;
-      }
-      renderTorrents(data);
-    });
+  async function activateTorrent(entry) {
+    setLibraryStatus('Switching to ' + entry.name + '…', 'warn');
+    try {
+      /* Ответ приходит полным состоянием библиотеки: клиенту не нужно
+         догадываться, с кого снялся флаг активного, и второй запрос не нужен.
+         Перезагружать страницу, как раньше, больше незачем — плеера,
+         состояние которого пришлось бы пересобирать, здесь нет. */
+      renderTorrents(await api('/api/torrents/' + entry.id + '/activate', { method: 'POST' }));
+      setLibraryStatus('Now on air: ' + entry.name, 'ok');
+    } catch (e) {
+      setLibraryStatus('Cannot switch: ' + e.message, 'bad');
+    }
   }
 
-  function activateTorrent(entry) {
-    setLibraryStatus('Switching to ' + entry.name + '…', 'status-warn');
-    postJson(apiUrl('/api/torrents/' + entry.id + '/activate'), null, function (err) {
-      if (err) {
-        setLibraryStatus('Cannot switch: ' + err.message, 'status-bad');
-        return;
-      }
-      /* Перезагрузка страницы, а не точечное обновление: сменился торрент —
-         сменились и список серий, и позиции просмотра, и текущий сеанс,
-         который сервер только что погасил. Пересобирать это вручную дороже
-         и риска больше, чем начать с чистого листа. */
-      location.reload();
-    });
-  }
-
-  function deleteTorrent(entry) {
+  async function deleteTorrent(entry) {
     if (!confirm('Remove "' + entry.name + '" from the library?')) return;
     /* Скачанное удаляется только по отдельному подтверждению: это десятки
        гигабайт, и вернуть их можно лишь повторной закачкой. */
-    var withData = confirm('Also delete downloaded data for "' + entry.name + '"?\n\n' +
+    const withData = confirm('Also delete downloaded data for "' + entry.name + '"?\n\n' +
       'OK — delete files from disk, Cancel — keep them.');
-    setLibraryStatus('Removing ' + entry.name + '…', 'status-warn');
-    postJson(apiUrl('/api/torrents/' + entry.id + '/delete') + (withData ? '?data=1' : ''), null, function (err, data) {
-      if (err) {
-        setLibraryStatus('Cannot remove: ' + err.message, 'status-bad');
-        return;
-      }
-      if (entry.active) {
-        location.reload();
-        return;
-      }
-      setLibraryStatus('Removed.', 'status-ok');
-      renderTorrents(data);
-    });
+    setLibraryStatus('Removing ' + entry.name + '…', 'warn');
+    try {
+      renderTorrents(await api('/api/torrents/' + entry.id + '/delete' + (withData ? '?data=1' : ''),
+        { method: 'POST' }));
+      setLibraryStatus('Removed.', 'ok');
+    } catch (e) {
+      setLibraryStatus('Cannot remove: ' + e.message, 'bad');
+    }
   }
 
-  function uploadTorrent() {
-    var file = torrentFile.files && torrentFile.files[0];
+  $('uploadBtn').onclick = async () => {
+    const file = $('torrentFile').files && $('torrentFile').files[0];
     if (!file) {
       /* Ничего не выбрано — открываем выбор сами, вместо упрёка. */
-      setLibraryStatus('Pick a .torrent file.', 'status-warn');
-      torrentFile.click();
+      setLibraryStatus('Pick a .torrent file.', 'warn');
+      $('torrentFile').click();
       return;
     }
-    setLibraryStatus('Uploading ' + file.name + '…', 'status-warn');
-    postJson(apiUrl('/api/torrents'), file, function (err, data) {
-      if (err) {
-        setLibraryStatus('Upload failed: ' + err.message, 'status-bad');
-        return;
-      }
-      torrentFile.value = '';
-      /* Первый торрент в пустой библиотеке сервер включает сам —
-         тогда странице нужен полный перезапуск, как и при переключении. */
-      if (!torrentKey && data && data.active) {
-        location.reload();
-        return;
-      }
-      setLibraryStatus('Uploaded. Press “Watch this” to switch.', 'status-ok');
-      renderTorrents(data);
-    });
-  }
-
-  function setLibraryVisible(on) {
-    libraryPanel.className = on ? '' : 'hidden';
-    document.getElementById('libToggle').textContent = on ? 'Hide' : 'Show';
-  }
-
-  document.getElementById('libToggle').onclick = function () {
-    var on = libraryPanel.className === 'hidden';
-    setLibraryVisible(on);
-    if (on) loadTorrents();
+    setLibraryStatus('Uploading ' + file.name + '…', 'warn');
+    try {
+      /* Файл уходит телом как есть: multipart тут ничего не даёт, а сервер
+         принимает оба варианта. */
+      renderTorrents(await api('/api/torrents', { method: 'POST', body: file }));
+      $('torrentFile').value = '';
+      setLibraryStatus('Uploaded. Press “Watch this” to switch.', 'ok');
+    } catch (e) {
+      setLibraryStatus('Upload failed: ' + e.message, 'bad');
+    }
   };
-  document.getElementById('uploadBtn').onclick = uploadTorrent;
 
-  autonext.checked = get('tms.autonext', '1') !== '0';
-  pollServerStatus();
-  setInterval(pollServerStatus, 1000);
-  loadTorrents();
+  /* ── Экран 2: сеанс на телевизоре ───────────────────────────────────── */
 
-  xhrJson(apiUrl('/api/files'), function (err, data) {
-    if (err) {
-      status.textContent = 'Cannot load file list: ' + err.message;
+  const STATE_CLASS = {
+    ready: 'ok', finished: 'ok',
+    preparing: 'warn', buffering: 'warn',
+    error: 'bad', stopped: '', replaced: '',
+  };
+
+  let lastFFmpeg = null;
+
+  function renderSession(status) {
+    const body = $('sessionBody');
+    const pb = status && status.playback;
+    if (!pb) {
+      body.innerHTML = '';
+      body.appendChild(el('div', 'empty',
+        status && status.ready
+          ? 'Nothing is playing. The TV starts a session itself when an episode is opened.'
+          : 'Waiting for torrent metadata…'));
+      $('stopBtn').disabled = true;
       return;
     }
-    episodes = data.files;
-    torrentKey = data.torrent || '';
-    document.getElementById('title').textContent = data.torrent;
-    episode.innerHTML = '';
-    for (var i = 0; i < episodes.length; i++) option(episode, String(episodes[i].index), episodes[i].name);
-    var last = lastEpisode(episodes.length ? episodes[0].index : 0);
-    var exists = false;
-    for (var j = 0; j < episodes.length; j++) if (episodes[j].index === last) exists = true;
-    if (!exists && episodes.length) last = episodes[0].index;
-    if (episodes.length) loadEpisode(last, false);
+    $('stopBtn').disabled = false;
+
+    body.innerHTML = '';
+    body.appendChild(el('div', 'episode', pb.name));
+
+    const head = el('div', 'row');
+    head.appendChild(el('span', 'chip ' + (STATE_CLASS[pb.state] || ''), pb.state));
+    head.appendChild(el('span', 'small muted', 'session ' + pb.id));
+    body.appendChild(head);
+
+    const list = el('dl', 'kv');
+    body.appendChild(list);
+
+    const pairs = [
+      ['episode index', '[' + pb.index + ']'],
+      ['audio / subs', pb.audio + ' / ' + pb.sub],
+      ['pipeline', 'video ' + (pb.videoMode || '?') + ' · audio ' + (pb.audioMode || '?')],
+      /* Именно точка входа, а не позиция просмотра: где сейчас playhead
+         телевизора, сервер не знает — тот играет сегменты сам и о своём
+         времени никому не докладывает. */
+      ['entry point', fmtTime(pb.start)],
+      ['running', fmtAgo(pb.startedAt).replace(' ago', '')],
+      ['produced', pb.segments + ' segments · ' + fmtBytes(pb.bytesOut)],
+      ['torrent read', fmtBytes(pb.downloadedSinceStart)],
+      ['last output', pb.lastOutputAt ? fmtAgo(pb.lastOutputAt) : '—'],
+    ];
+    if (lastFFmpeg) {
+      pairs.push(['ffmpeg', 'pid ' + lastFFmpeg.pid + ' · ' + fmtPct(lastFFmpeg.cpu, 0) +
+        ' cpu · ' + fmtBytes(lastFFmpeg.rss)]);
+    } else if (pb.ffmpegPid) {
+      pairs.push(['ffmpeg', 'pid ' + pb.ffmpegPid]);
+    }
+    if (pb.exitCode !== null && pb.exitCode !== undefined) {
+      pairs.push(['exit code', String(pb.exitCode), pb.exitCode === 0 ? '' : 'bad']);
+    }
+    if (pb.error) pairs.push(['error', pb.error, 'bad']);
+    kv(list, pairs);
+  }
+
+  function renderTorrentStats(status) {
+    const list = $('torrentStats');
+    if (!status || !status.ready) {
+      kv(list, [['state', 'loading metadata…', 'warn']]);
+      return;
+    }
+    kv(list, [
+      ['name', activeTorrentName || '—'],
+      ['peers', String(status.peers), status.peers > 0 ? 'ok' : 'warn'],
+      ['download', fmtRate(status.downloadSpeed)],
+      ['received', fmtBytes(status.downloaded)],
+      ['complete', (Number(status.progress || 0) * 100).toFixed(2) + '%'],
+    ]);
+  }
+
+  async function pollStatus() {
+    try {
+      const status = await api('/api/status');
+      setLive(true, status.ready ? 'live' : 'loading metadata');
+      renderSession(status);
+      renderTorrentStats(status);
+    } catch (e) {
+      $('sessionBody').innerHTML = '';
+      $('sessionBody').appendChild(el('div', 'empty bad', 'Cannot reach the server: ' + e.message));
+    }
+  }
+
+  $('stopBtn').onclick = async () => {
+    if (!confirm('Stop the running session?\n\n' +
+      'ffmpeg is killed and the TV loses the stream — it drops back to its menu.')) return;
+    $('actionStatus').textContent = 'Stopping…';
+    $('actionStatus').className = 'small warn';
+    try {
+      const res = await api('/api/stop', { method: 'POST' });
+      $('actionStatus').textContent = res && res.stopped
+        ? 'Stopped session ' + res.stopped + '.'
+        : 'Nothing was running.';
+      $('actionStatus').className = 'small ok';
+      pollStatus();
+    } catch (e) {
+      $('actionStatus').textContent = 'Cannot stop: ' + e.message;
+      $('actionStatus').className = 'small bad';
+    }
+  };
+
+  /* ── Экран 3: дашборд ───────────────────────────────────────────────── */
+
+  /* Ряды приезжают с сервера, а не копятся в странице: кольцо живёт в процессе
+     и переживает перезагрузку вкладки, поэтому открытая через час страница
+     сразу показывает последние минуты, а не пустой график. Целиком они
+     запрашиваются только при открытии экрана; дальше каждая точка
+     дорисовывается из обычного ответа. */
+  let needHistory = true;
+  let series = null;
+  let lastReport = null;
+  const WINDOW_POINTS = 300;
+
+  const CHARTS = [
+    { key: 'cpu', title: 'Host CPU', color: '#5aa9e6', fmt: (v) => fmtPct(v, 1), max: () => 100 },
+    { key: 'mem', title: 'Host memory', color: '#a78bfa', fmt: fmtBytes,
+      max: (r) => (r.host && r.host.memTotal) || 0 },
+    { key: 'free', title: 'Disk free', color: '#4ec97a', fmt: fmtBytes,
+      max: (r) => (r.disks && r.disks[0] ? r.disks[0].total : 0) },
+    { key: 'download', title: 'Torrent in', color: '#f0b24a', fmt: fmtRate, max: () => 0 },
+    { key: 'output', title: 'HLS out', color: '#ef6461', fmt: fmtRate, max: () => 0 },
+    { key: 'ffmpeg', title: 'ffmpeg CPU', color: '#e0e4ec', fmt: (v) => fmtPct(v, 0), max: () => 0 },
+  ];
+
+  function buildCharts() {
+    const box = $('charts');
+    for (const c of CHARTS) {
+      const panel = el('div', 'panel');
+      const head = el('div', 'chart-head');
+      head.appendChild(el('span', 'title', c.title));
+      c.nowNode = el('span', 'now', '—');
+      head.appendChild(c.nowNode);
+      panel.appendChild(head);
+      c.canvas = el('canvas');
+      panel.appendChild(c.canvas);
+      const foot = el('div', 'chart-foot');
+      foot.appendChild(el('span', '', 'oldest'));
+      c.maxNode = el('span', '', '');
+      foot.appendChild(c.maxNode);
+      foot.appendChild(el('span', '', 'now'));
+      panel.appendChild(foot);
+      box.appendChild(panel);
+    }
+  }
+  buildCharts();
+
+  /* niceMax — верх шкалы, округлённый до 1/2/5·10ⁿ.
+     Без него ось прыгала бы на каждой точке, и глаз не мог бы сравнить
+     два соседних кадра: график «дышал» бы, стоя на месте. */
+  function niceMax(values) {
+    let top = 0;
+    for (const v of values) if (v !== null && v > top) top = v;
+    if (top <= 0) return 1;
+    const pow = Math.pow(10, Math.floor(Math.log10(top)));
+    const norm = top / pow;
+    const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+    return step * pow;
+  }
+
+  function drawChart(canvas, values, color, max) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (!w || !h) return;
+    if (canvas.width !== Math.round(w * dpr)) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+    }
+    const g = canvas.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+
+    g.strokeStyle = '#252a36';
+    g.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const y = Math.round((h - 1) * (i / 4)) + 0.5;
+      g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+    }
+    if (!values.length || max <= 0) return;
+
+    /* Шкала X всегда на полное окно, даже когда точек меньше: иначе первые
+       минуты после запуска график растягивался бы на всю ширину и «схлопывался»
+       по мере накопления истории. */
+    const span = Math.max(values.length - 1, 1);
+    const x = (i) => (span ? (i / span) * (w - 1) : 0);
+    const y = (v) => (h - 2) - (Math.min(v, max) / max) * (h - 4);
+
+    g.beginPath();
+    let open = false;
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i];
+      if (v === null || v === undefined) { open = false; continue; }
+      if (!open) { g.moveTo(x(i), y(v)); open = true; } else g.lineTo(x(i), y(v));
+    }
+    g.strokeStyle = color;
+    g.lineWidth = 2;
+    g.lineJoin = 'round';
+    g.stroke();
+
+    /* Заливка рисуется отрезками, а не одним контуром: разрыв в данных
+       («сеанса не было») обязан остаться разрывом, а не превратиться
+       в прямую от точки до точки. */
+    g.fillStyle = color + '26';
+    let from = -1;
+    for (let i = 0; i <= values.length; i++) {
+      const v = i < values.length ? values[i] : null;
+      if (v !== null && v !== undefined) { if (from < 0) from = i; continue; }
+      if (from < 0) continue;
+      const to = i - 1;
+      g.beginPath();
+      g.moveTo(x(from), h);
+      for (let k = from; k <= to; k++) g.lineTo(x(k), y(values[k]));
+      g.lineTo(x(to), h);
+      g.closePath();
+      g.fill();
+      from = -1;
+    }
+  }
+
+  function lastValue(values) {
+    for (let i = values.length - 1; i >= 0; i--) {
+      if (values[i] !== null && values[i] !== undefined) return values[i];
+    }
+    return null;
+  }
+
+  function renderCharts(report) {
+    if (!series) return;
+    for (const c of CHARTS) {
+      const values = series[c.key] || [];
+      /* Ряд, в котором нет ни одной точки, — это «мерить нечем» (нет /proc,
+         нет сеанса), а не «всё по нулям». Подпись «top 1 B» под пустым полем
+         читалась бы как показание. */
+      const hasData = values.some((v) => v !== null && v !== undefined);
+      const max = c.max(report) || niceMax(values);
+      drawChart(c.canvas, hasData ? values : [], c.color, max);
+      c.nowNode.textContent = hasData ? c.fmt(lastValue(values)) : '—';
+      c.maxNode.textContent = hasData ? 'top ' + c.fmt(max) : 'no data';
+    }
+  }
+
+  function tile(label, value, sub, cls) {
+    const t = el('div', 'tile');
+    t.appendChild(el('div', 'label', label));
+    t.appendChild(el('div', 'value ' + (cls || ''), value));
+    t.appendChild(el('div', 'sub', sub || ''));
+    return t;
+  }
+
+  function renderTiles(r) {
+    const box = $('tiles');
+    box.innerHTML = '';
+    const host = r.host || {};
+    const disk = (r.disks && r.disks[0]) || null;
+
+    box.appendChild(host.measured
+      ? tile('CPU', fmtPct(host.cpu, 1), host.cores + ' cores · load ' +
+          (host.load1 === null || host.load1 === undefined ? '—' : host.load1.toFixed(2)),
+          host.cpu >= 90 ? 'bad' : host.cpu >= 70 ? 'warn' : '')
+      : tile('CPU', '—', 'not measured on this OS'));
+
+    box.appendChild(host.measured && host.memTotal
+      ? tile('RAM', fmtPct((host.memUsed / host.memTotal) * 100, 0),
+          fmtBytes(host.memUsed) + ' of ' + fmtBytes(host.memTotal),
+          host.memUsed / host.memTotal >= 0.9 ? 'bad' : '')
+      : tile('RAM', '—', 'not measured on this OS'));
+
+    box.appendChild(disk
+      ? tile('Disk free', fmtBytes(disk.free),
+          disk.label + ' · ' + fmtBytes(disk.total) + ' total',
+          r.reclaim && r.reclaim.minFree > 0 && disk.free < r.reclaim.minFree ? 'warn' : '')
+      : tile('Disk free', '—', 'not measured'));
+
+    box.appendChild(tile('Our data', disk && disk.ours >= 0 ? fmtBytes(disk.ours) : '—',
+      (disk ? disk.label + ' · ' : '') + (r.reclaim && r.reclaim.minFree > 0
+        ? 'evict below ' + fmtBytes(r.reclaim.minFree)
+        : 'auto-cleanup off')));
+
+    const t = r.torrent;
+    box.appendChild(t
+      ? tile('Peers', String(t.peers), fmtRate(t.downloadSpeed), t.peers > 0 ? '' : 'warn')
+      : tile('Peers', '—', 'no active torrent'));
+
+    const s = r.session;
+    box.appendChild(s
+      ? tile('Session', s.state, s.segments + ' segments · ' + fmtBytes(s.bytesOut),
+          s.state === 'error' ? 'bad' : s.state === 'ready' || s.state === 'finished' ? 'ok' : 'warn')
+      : tile('Session', 'idle', 'nobody is watching'));
+
+    /* «Не бежит» и «бежит, но не измеряется» — разные вещи: на системе без
+       /proc pid у нас есть, а потребления нет, и написать «not running» под
+       живым ffmpeg значило бы соврать. */
+    box.appendChild(r.ffmpeg
+      ? tile('ffmpeg', fmtPct(r.ffmpeg.cpu, 0), 'pid ' + r.ffmpeg.pid + ' · ' + fmtBytes(r.ffmpeg.rss))
+      : tile('ffmpeg', '—', s && s.ffmpegPid ? 'pid ' + s.ffmpegPid + ' · not measured' : 'not running'));
+
+    box.appendChild(tile('HLS out', fmtRate(r.rates && r.rates.output),
+      r.rates && r.rates.segments !== null && r.rates.segments !== undefined
+        ? r.rates.segments.toFixed(2) + ' seg/s'
+        : 'idle'));
+  }
+
+  function renderRuntime(r) {
+    const rt = r.runtime || {};
+    const disks = (r.disks || []).map((d) =>
+      d.label + ' ' + fmtBytes(d.free) + ' free' +
+      (d.ours >= 0 ? ' · ours ' + fmtBytes(d.ours) : ''));
+    kv($('runtimeStats'), [
+      ['uptime', fmtTime(rt.uptime)],
+      ['goroutines', String(rt.goroutines)],
+      ['heap', fmtBytes(rt.heapAlloc) + ' of ' + fmtBytes(rt.heapSys)],
+      ['gc cycles', String(rt.numGC)],
+      ['process', 'pid ' + r.process.pid + (r.process.cpu === null && !r.process.rss
+        ? ' · not measured'
+        : ' · ' + fmtPct(r.process.cpu, 0) + ' cpu · ' + fmtBytes(r.process.rss))],
+      ['swap', r.host && r.host.measured && r.host.swapTotal
+        ? fmtBytes(r.host.swapUsed) + ' of ' + fmtBytes(r.host.swapTotal) : '—'],
+      ['filesystems', disks.length ? disks.join(' · ') : '—'],
+      ['reclaimed', r.reclaim
+        ? r.reclaim.evicted + ' file(s), ' + fmtBytes(r.reclaim.evictedBytes) +
+          (r.reclaim.lastEvictedAt ? ' · last ' + fmtAgo(r.reclaim.lastEvictedAt) : '')
+        : '—'],
+    ]);
+  }
+
+  /* Дорисовка одной точки к уже полученным рядам. Дубли отсекаются по времени:
+     сборщик снимает показания реже, чем страница опрашивает, и без проверки
+     один и тот же замер лёг бы в ряд несколько раз, растянув окно. */
+  function appendPoint(r) {
+    if (!series || !series.t.length) return false;
+    if (r.at <= series.t[series.t.length - 1]) return true;
+    const disk = (r.disks && r.disks[0]) || null;
+    const push = (key, value) => {
+      series[key].push(value === undefined ? null : value);
+      while (series[key].length > WINDOW_POINTS) series[key].shift();
+    };
+    push('t', r.at);
+    push('cpu', r.host ? r.host.cpu : null);
+    push('mem', r.host && r.host.measured ? r.host.memUsed : null);
+    push('free', disk ? disk.free : null);
+    push('download', r.torrent ? r.torrent.downloadSpeed : null);
+    push('output', r.rates ? r.rates.output : null);
+    push('ffmpeg', r.ffmpeg ? r.ffmpeg.cpu : null);
+    push('peers', r.torrent ? r.torrent.peers : null);
+    return true;
+  }
+
+  async function pollMetrics() {
+    let report;
+    try {
+      report = await api('/api/metrics' + (needHistory ? '?history=1' : ''));
+    } catch (e) {
+      if (e.status === 503) {
+        $('tiles').innerHTML = '';
+        $('tiles').appendChild(tile('Metrics', 'off', 'collector is not running'));
+      }
+      return;
+    }
+    setLive(true, 'live');
+    lastReport = report;
+    if (report.series) {
+      series = report.series;
+      needHistory = false;
+    } else if (!appendPoint(report)) {
+      /* Рядов нет вовсе — например, вкладка проснулась после долгого сна
+         и первый ответ пришёл без истории. Просим её на следующем такте. */
+      needHistory = true;
+    }
+    renderTiles(report);
+    renderRuntime(report);
+    renderCharts(report);
+  }
+
+  /* Перерисовка по последнему отчёту, а не по пустому: верх шкалы у памяти
+     и диска берётся из него, и без отчёта график после поворота телефона
+     сменил бы масштаб на ровном месте. */
+  window.addEventListener('resize', () => {
+    if (screen === 'metrics' && lastReport) renderCharts(lastReport);
   });
+
+  /* ── Опрос ──────────────────────────────────────────────────────────── */
+
+  let ticks = 0;
+  function tick() {
+    /* Вкладка в фоне не опрашивается: телефон всё равно усыпит таймеры,
+       а разбуженная страница первым же тактом дотянет свежее. */
+    if (document.hidden) return;
+    ticks++;
+    if (screen === 'session') {
+      pollStatus();
+      /* ffmpeg живёт в /api/metrics: снимок сеанса знает его pid, но не знает,
+         сколько тот ест. Раз в три такта — этого хватает, число дробное. */
+      if (ticks % 3 === 0) pollFFmpeg();
+    } else if (screen === 'metrics') {
+      if (ticks % 2 === 0) pollMetrics();
+    } else if (ticks % 5 === 0) {
+      loadTorrents();
+    }
+  }
+
+  async function pollFFmpeg() {
+    try {
+      const r = await api('/api/metrics');
+      lastFFmpeg = r.ffmpeg;
+    } catch (e) { lastFFmpeg = null; }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    /* История за время сна не дорисовывается точками — их пропущено сколько
+       угодно. Проще забрать ряды заново. */
+    needHistory = true;
+    showScreen(screen);
+  });
+
+  showScreen(screen);
+  loadTorrents();
+  setInterval(tick, 1000);
 })();
 </script>
 </body>
