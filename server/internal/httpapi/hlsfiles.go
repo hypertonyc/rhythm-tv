@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/avdav/torrent-media/server/internal/hls"
 )
@@ -71,7 +72,7 @@ func (s *Server) serveHLSFile(w http.ResponseWriter, r *http.Request, sessionID,
 			writeText(w, http.StatusNotFound, "Not ready", contentTypeText)
 			return
 		}
-		body = withStartAtBeginning(raw)
+		body = s.playerPlaylist(sessionID, raw)
 	} else {
 		f, err = os.Open(full)
 		if err != nil {
@@ -79,6 +80,11 @@ func (s *Server) serveHLSFile(w http.ResponseWriter, r *http.Request, sessionID,
 			return
 		}
 		defer f.Close()
+		if strings.HasSuffix(fileName, ".ts") {
+			// Плеер забрал сегмент — значит точку входа он уже выбрал,
+			// и окно можно открывать целиком.
+			s.notePlayerJoined(sessionID)
+		}
 	}
 
 	size := st.Size()
@@ -100,6 +106,142 @@ func (s *Server) serveHLSFile(w http.ResponseWriter, r *http.Request, sessionID,
 		return
 	}
 	_, _ = io.Copy(w, f)
+}
+
+// Окно входа: плеер начинает не там, где мы просим, а там, где велит правило
+// HLS, — и единственный надёжный рычаг это то, ЧТО объявлено в плейлисте.
+//
+// Правило (RFC 8216, 6.3.3) прошивка исполняет буквально, и это измерено
+// 17.08.2026 по логу nginx: в сеансе msx85f6j на втором запросе плейлиста было
+// объявлено 17 сегментов, то есть 68.5 с при `TARGETDURATION:11`;
+// 68.5 - 3*11 = 35.5, и последний сегмент, начинающийся не позже 35.5, —
+// ровно `seg00008` с началом 33.7. Именно его телевизор и запросил первым.
+//
+// Отсюда способ: пока плеер не выбрал точку входа, объявлять не больше
+// 3*TARGETDURATION. Тогда `конец - 3*TARGETDURATION <= 0`, и подходит только
+// сегмент с началом 0. Хинты `EVENT` и `EXT-X-START` эта прошивка игнорирует
+// (проверено выкаткой), а арифметику — нет.
+const (
+	// joinBudgetTargetDurations — тот самый множитель из правила. Меньше брать
+	// незачем: чем шире окно, тем больше у плеера запас, прежде чем ему
+	// понадобятся сегменты за окном.
+	joinBudgetTargetDurations = 3
+
+	// joinFuse — предохранитель. Если плеер так и не забрал ни одного сегмента
+	// (например, эта прошивка на коротком плейлисте не входит, а ждёт роста),
+	// окно всё равно открывается, и поведение вырождается в прежнее — с потерей
+	// начала, но без вечного ожидания. Наблюдённое время до выбора — 2 с,
+	// так что 20 с это запас в десять раз.
+	joinFuse = 20 * time.Second
+)
+
+// notePlayerJoined запоминает, что плеер этого сеанса уже забирал сегменты.
+//
+// Состояние одно на весь сервер, а не на сеанс: подрезается только живой
+// сеанс (у доигранного есть ENDLIST), а живой ровно один — новый /api/start
+// гасит предыдущий. Так не нужен ни рост карты на каждую перемотку,
+// ни её чистка.
+func (s *Server) notePlayerJoined(sessionID string) {
+	s.joinMu.Lock()
+	s.joinedSession = sessionID
+	s.joinMu.Unlock()
+}
+
+func (s *Server) playerJoined(sessionID string) bool {
+	s.joinMu.Lock()
+	defer s.joinMu.Unlock()
+	return s.joinedSession == sessionID
+}
+
+// playerPlaylist готовит плейлист к отдаче плееру.
+func (s *Server) playerPlaylist(sessionID string, raw []byte) []byte {
+	body := withStartAtBeginning(raw)
+
+	// Доигранный плейлист не трогаем вовсе: с ENDLIST правило входа
+	// не действует, плеер и так начинает с начала. Это же условие спасает
+	// подобранный после выкатки сеанс — его смотрят с середины, и подрезать
+	// у него список сегментов значило бы выбить из-под плеера то, что он играет.
+	if bytes.Contains(raw, []byte("#EXT-X-ENDLIST")) {
+		return body
+	}
+	if s.playerJoined(sessionID) {
+		return body
+	}
+	snap, ok := s.deps.HLS.Get(sessionID)
+	if !ok {
+		return body
+	}
+	if time.Since(time.UnixMilli(snap.StartedAt)) > joinFuse {
+		return body
+	}
+	return truncateToJoinWindow(body)
+}
+
+// truncateToJoinWindow оставляет в плейлисте начало не длиннее
+// joinBudgetTargetDurations * TARGETDURATION.
+//
+// ENDLIST здесь появиться не может (выше проверено, что его нет), поэтому
+// обрезанный хвост не выглядит концом потока: плеер перечитает плейлист
+// и получит продолжение — к тому времени он уже забрал сегмент, и окно открыто.
+//
+// Плейлист, в котором не нашлось ни TARGETDURATION, ни сегментов, отдаётся
+// как есть: портить непонятое хуже, чем отдать без правки.
+func truncateToJoinWindow(playlist []byte) []byte {
+	lines := bytes.SplitAfter(playlist, []byte("\n"))
+
+	budget, ok := targetDuration(lines)
+	if !ok {
+		return playlist
+	}
+	budget *= joinBudgetTargetDurations
+
+	var out []byte
+	var spent float64
+	for i := 0; i < len(lines); i++ {
+		if !bytes.HasPrefix(lines[i], []byte("#EXTINF:")) {
+			out = append(out, lines[i]...)
+			continue
+		}
+		// Сегмент — это пара строк: #EXTINF и путь. Половинку отдать нельзя.
+		if i+1 >= len(lines) {
+			break
+		}
+		d, err := strconv.ParseFloat(string(bytes.TrimRight(
+			bytes.TrimPrefix(lines[i], []byte("#EXTINF:")), ",\r\n")), 64)
+		if err != nil {
+			return playlist
+		}
+		// Первый сегмент оставляем всегда: он короче TARGETDURATION
+		// по определению, но арифметику с плавающей точкой лучше
+		// не заставлять это доказывать.
+		if spent > 0 && spent+d > budget {
+			break
+		}
+		spent += d
+		out = append(out, lines[i]...)
+		out = append(out, lines[i+1]...)
+		i++
+	}
+	if spent == 0 {
+		return playlist
+	}
+	return out
+}
+
+// targetDuration достаёт #EXT-X-TARGETDURATION — знаменатель правила входа.
+func targetDuration(lines [][]byte) (float64, bool) {
+	const tag = "#EXT-X-TARGETDURATION:"
+	for _, line := range lines {
+		if !bytes.HasPrefix(line, []byte(tag)) {
+			continue
+		}
+		v, err := strconv.ParseFloat(string(bytes.TrimSpace(bytes.TrimPrefix(line, []byte(tag)))), 64)
+		if err != nil || v <= 0 {
+			return 0, false
+		}
+		return v, true
+	}
+	return 0, false
 }
 
 // startTag — «предпочтительная точка старта: начало».

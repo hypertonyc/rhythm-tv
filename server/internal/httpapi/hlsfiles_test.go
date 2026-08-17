@@ -1,16 +1,78 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/avdav/torrent-media/server/internal/hls"
 	"github.com/avdav/torrent-media/server/internal/subs"
 )
+
+// observedDurations — EXTINF первых семнадцати сегментов сеанса msx85f6j
+// (s03e06, режим copy) ровно как их нарезал ffmpeg на проде 17.08.2026.
+// Столько было объявлено в момент, когда телевизор выбрал точку входа.
+var observedDurations = []float64{
+	6.131, 4.463, 3.629, 3.920, 3.837, 2.836, 7.675, 1.251, 3.378,
+	4.713, 2.753, 10.636, 1.626, 1.335, 2.544, 4.088, 3.712,
+}
+
+// observedPlaylist собирает живой плейлист того сеанса: TARGETDURATION 11
+// (самый длинный сегмент — 10.636), ENDLIST ещё нет.
+func observedPlaylist() string {
+	var b strings.Builder
+	b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:11\n" +
+		"#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:EVENT\n")
+	for i, d := range observedDurations {
+		fmt.Fprintf(&b, "#EXTINF:%.6f,\nseg%05d.ts\n", d, i)
+	}
+	return b.String()
+}
+
+// firmwareJoin повторяет арифметику прошивки над плейлистом: берётся последний
+// сегмент, начало которого не позже (конец плейлиста - 3*TARGETDURATION).
+//
+// Это не догадка о правиле, а измерение: на проде телевизор запросил первым
+// seg00008, и та же формула на том же плейлисте даёт seg00008 (проверяется
+// тестом ниже). Единственное допущение — что при отрицательной цели плеер
+// берёт первый сегмент: другого варианта у него нет, сегментов раньше нуля
+// не существует.
+func firmwareJoin(playlist string) string {
+	var td float64
+	type seg struct {
+		name  string
+		start float64
+	}
+	var segs []seg
+	var total float64
+	lines := strings.Split(playlist, "\n")
+	for i, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "#EXT-X-TARGETDURATION:"):
+			td, _ = strconv.ParseFloat(strings.TrimPrefix(line, "#EXT-X-TARGETDURATION:"), 64)
+		case strings.HasPrefix(line, "#EXTINF:") && i+1 < len(lines):
+			d, _ := strconv.ParseFloat(strings.TrimSuffix(strings.TrimPrefix(line, "#EXTINF:"), ","), 64)
+			segs = append(segs, seg{name: lines[i+1], start: total})
+			total += d
+		}
+	}
+	if len(segs) == 0 {
+		return ""
+	}
+	target := total - 3*td
+	chosen := segs[0].name
+	for _, s := range segs {
+		if s.start <= target {
+			chosen = s.name
+		}
+	}
+	return chosen
+}
 
 // livePlaylist — плейлист ffmpeg таким, каким он лежит в каталоге сеанса
 // на середине работы: ENDLIST ещё нет, EVENT уже есть (см. hls.BuildArgs).
@@ -24,15 +86,30 @@ const livePlaylist = "#EXTM3U\n" +
 
 func newSessionServer(t *testing.T, files map[string]string) *Server {
 	t.Helper()
+	return newSessionServerAge(t, files, nil)
+}
+
+// newSessionServerAge — тот же сервер, но с живым сеансом известного возраста:
+// подрезка окна входа смотрит на StartedAt. nil означает «снимка нет».
+func newSessionServerAge(t *testing.T, files map[string]string, age *time.Duration) *Server {
+	t.Helper()
 	dir := t.TempDir()
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
+	sessions := &fakeSessions{calls: new([]string), dir: dir}
+	if age != nil {
+		sessions.snap = &hls.Snapshot{
+			ID:        "abc",
+			StartedAt: time.Now().Add(-*age).UnixMilli(),
+			State:     "ready",
+		}
+	}
 	calls := make([]string, 0)
 	lib := &fakeLibrary{calls: &calls, activeID: strings.Repeat("c", 40)}
-	return New(Deps{Library: lib, HLS: &fakeSessions{calls: &calls, dir: dir}})
+	return New(Deps{Library: lib, HLS: sessions})
 }
 
 // TestPlayerPlaylistStartsAtBeginning — главный тест правки: плейлист, который
@@ -61,6 +138,108 @@ func TestPlayerPlaylistStartsAtBeginning(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "application/vnd.apple.mpegurl" {
 		t.Errorf("Content-Type %q", ct)
+	}
+}
+
+// TestFirmwareRuleReproducesTheBug — тест самого измерения. Без него следующий
+// тест мог бы проходить на неверной формуле и ничего не гарантировать.
+//
+// На плейлисте, который прошивка видела 17.08.2026 в 12:43:11, формула обязана
+// дать seg00008 — именно его телевизор и запросил первым, потеряв 33.7 с серии.
+func TestFirmwareRuleReproducesTheBug(t *testing.T) {
+	if got := firmwareJoin(observedPlaylist()); got != "seg00008.ts" {
+		t.Fatalf("формула даёт %q, а телевизор на проде запросил seg00008.ts", got)
+	}
+}
+
+// TestJoinWindowForcesFirstSegment — главный тест правки: на подрезанном
+// плейлисте та же арифметика прошивки не может дать ничего, кроме seg00000.
+func TestJoinWindowForcesFirstSegment(t *testing.T) {
+	fresh := 2 * time.Second // столько прошло до выбора точки входа на проде
+	s := newSessionServerAge(t, map[string]string{hls.PlaylistName: observedPlaylist()}, &fresh)
+
+	rec := do(s, http.MethodGet, "/hls/abc/"+hls.PlaylistName, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("код %d", rec.Code)
+	}
+	served := rec.Body.String()
+
+	if got := firmwareJoin(served); got != "seg00000.ts" {
+		t.Errorf("прошивка вошла бы в %q, а не в начало серии\nотдано:\n%s", got, served)
+	}
+	// Окно должно быть максимально широким: чем больше сегментов внутри
+	// 3*TARGETDURATION, тем дольше плееру хватает объявленного.
+	// seg00000-00006 это 32.491 с, седьмой (+1.251) вышел бы за 33.
+	if n := strings.Count(served, ".ts\n"); n != 7 {
+		t.Errorf("в окне %d сегментов, ожидалось 7 (32.491 с при бюджете 33)", n)
+	}
+	// Хвост обрезан, но не посередине пары и не в конце потока.
+	if strings.Contains(served, "#EXT-X-ENDLIST") {
+		t.Error("в подрезанный плейлист попал ENDLIST — плеер решит, что серия кончилась")
+	}
+	if !strings.HasSuffix(served, ".ts\n") {
+		t.Errorf("плейлист кончается не сегментом:\n%s", served)
+	}
+	if !strings.Contains(served, "#EXT-X-TARGETDURATION:11\n") {
+		t.Error("заголовок потерян")
+	}
+}
+
+// TestJoinWindowOpensAfterPlayerTookSegment — окно держится только до выбора
+// точки входа. Дальше плеер играет подряд и правило больше не применяет,
+// а держать подрезку значило бы ограничить ему запас на всю серию.
+func TestJoinWindowOpensAfterPlayerTookSegment(t *testing.T) {
+	fresh := 2 * time.Second
+	s := newSessionServerAge(t, map[string]string{
+		hls.PlaylistName: observedPlaylist(),
+		"seg00000.ts":    "payload",
+	}, &fresh)
+
+	if n := strings.Count(do(s, http.MethodGet, "/hls/abc/"+hls.PlaylistName, nil).Body.String(), ".ts\n"); n != 7 {
+		t.Fatalf("до сегмента отдано %d сегментов, ожидалось 7", n)
+	}
+	do(s, http.MethodGet, "/hls/abc/seg00000.ts", nil)
+	if n := strings.Count(do(s, http.MethodGet, "/hls/abc/"+hls.PlaylistName, nil).Body.String(), ".ts\n"); n != len(observedDurations) {
+		t.Errorf("после сегмента отдано %d сегментов, ожидались все %d", n, len(observedDurations))
+	}
+}
+
+// TestJoinWindowFuseOpens — предохранитель. Если плеер на коротком плейлисте
+// не входит вовсе, а ждёт роста, окно обязано открыться само: потерянное начало
+// лучше вечного ожидания.
+func TestJoinWindowFuseOpens(t *testing.T) {
+	old := joinFuse + time.Second
+	s := newSessionServerAge(t, map[string]string{hls.PlaylistName: observedPlaylist()}, &old)
+
+	if n := strings.Count(do(s, http.MethodGet, "/hls/abc/"+hls.PlaylistName, nil).Body.String(), ".ts\n"); n != len(observedDurations) {
+		t.Errorf("после предохранителя отдано %d сегментов, ожидались все %d", n, len(observedDurations))
+	}
+}
+
+// TestFinishedPlaylistIsNotTruncated — доигранный сеанс не подрезается: правило
+// входа при ENDLIST не действует, а подобранный после выкатки сеанс смотрят
+// с середины, и выбить у плеера список сегментов значило бы оборвать серию.
+func TestFinishedPlaylistIsNotTruncated(t *testing.T) {
+	fresh := 2 * time.Second
+	finished := observedPlaylist() + "#EXT-X-ENDLIST\n"
+	s := newSessionServerAge(t, map[string]string{hls.PlaylistName: finished}, &fresh)
+
+	served := do(s, http.MethodGet, "/hls/abc/"+hls.PlaylistName, nil).Body.String()
+	if n := strings.Count(served, ".ts\n"); n != len(observedDurations) {
+		t.Errorf("отдано %d сегментов, ожидались все %d", n, len(observedDurations))
+	}
+	if !strings.HasSuffix(served, "#EXT-X-ENDLIST\n") {
+		t.Error("ENDLIST потерян — телевизор не увидит конца серии")
+	}
+}
+
+// TestPlaylistWithoutSessionSnapshotIsServedWhole — снимка нет, значит про
+// возраст сеанса ничего не известно; подрезать наугад нельзя.
+func TestPlaylistWithoutSessionSnapshotIsServedWhole(t *testing.T) {
+	s := newSessionServer(t, map[string]string{hls.PlaylistName: observedPlaylist()})
+
+	if n := strings.Count(do(s, http.MethodGet, "/hls/abc/"+hls.PlaylistName, nil).Body.String(), ".ts\n"); n != len(observedDurations) {
+		t.Errorf("отдано %d сегментов, ожидались все %d", n, len(observedDurations))
 	}
 }
 

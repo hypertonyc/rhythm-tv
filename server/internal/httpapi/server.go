@@ -89,6 +89,13 @@ type Server struct {
 
 	prebufMu sync.Mutex
 	prebuf   map[string]struct{}
+
+	// joinedSession — сеанс, плеер которого уже выбрал точку входа и забирает
+	// сегменты. Пока он не выбрал, плейлист отдаётся подрезанным
+	// (см. hlsfiles.go). Одно поле, а не карта: подрезается только живой сеанс,
+	// а живой ровно один.
+	joinMu        sync.Mutex
+	joinedSession string
 }
 
 func New(deps Deps) *Server {

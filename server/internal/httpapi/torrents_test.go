@@ -95,12 +95,21 @@ type fakeSessions struct {
 	active *string
 	// dir — каталог сеанса, если тест проверяет отдачу файлов. Пустой означает
 	// «сеанса нет», как и было до появления таких тестов.
-	dir string
+	dir  string
+	snap *hls.Snapshot
 }
 
 func (f *fakeSessions) Start(hls.StartOptions) (hls.Snapshot, error) { return hls.Snapshot{}, nil }
-func (f *fakeSessions) Get(string) (hls.Snapshot, bool)              { return hls.Snapshot{}, false }
 func (f *fakeSessions) ActiveSnapshot() *hls.Snapshot                { return nil }
+
+// Get отдаёт снимок, только если тест его завёл: подрезка окна входа смотрит
+// на StartedAt, а всем прежним тестам сеанс не нужен вовсе.
+func (f *fakeSessions) Get(string) (hls.Snapshot, bool) {
+	if f.snap == nil {
+		return hls.Snapshot{}, false
+	}
+	return *f.snap, true
+}
 
 func (f *fakeSessions) SessionDir(string) (string, bool) {
 	if f.dir == "" {
