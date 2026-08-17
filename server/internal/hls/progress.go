@@ -32,7 +32,7 @@ import (
 // одновременно.
 type progressWriter struct {
 	mu      sync.Mutex
-	tail    string  // недописанная строка между вызовами Write
+	tail    string // недописанная строка между вызовами Write
 	block   progressBlock
 	current progressBlock // последний ЗАВЕРШЁННЫЙ блок
 	seen    bool
