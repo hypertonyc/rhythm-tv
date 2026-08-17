@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/avdav/torrent-media/server/internal/hls"
 	"github.com/avdav/torrent-media/server/internal/httpapi/web"
@@ -105,16 +106,29 @@ type Server struct {
 	prebufMu sync.Mutex
 	prebuf   map[string]struct{}
 
-	// joinedSession — сеанс, плеер которого уже выбрал точку входа и забирает
-	// сегменты. Пока он не выбрал, плейлист отдаётся подрезанным
-	// (см. hlsfiles.go). Одно поле, а не карта: подрезается только живой сеанс,
-	// а живой ровно один.
-	joinMu        sync.Mutex
-	joinedSession string
+	// Окно входа (см. hlsfiles.go). Два независимых состояния, и оба одним
+	// значением, а не картой: подрезается только активный сеанс, а активный
+	// ровно один.
+	//
+	// joinedSession — сеанс, плеер которого уже забрал сегмент, то есть выбрал
+	// точку входа. Меняется только на запрос .ts.
+	//
+	// lookingSession/lookingSince — сеанс, у которого впервые спросили плейлист,
+	// и когда. От этого момента отмеряется joinFuse. Взводится один раз
+	// на сеанс: сбрасывать его на каждый взгляд значило бы никогда не дожить
+	// до предохранителя.
+	joinMu         sync.Mutex
+	joinedSession  string
+	lookingSession string
+	lookingSince   time.Time
+
+	// now — часы окна входа, в тестах подменяются: предохранитель отмеряет
+	// секунды от первого запроса плейлиста, и ждать их по-настоящему незачем.
+	now func() time.Time
 }
 
 func New(deps Deps) *Server {
-	return &Server{deps: deps, prebuf: make(map[string]struct{})}
+	return &Server{deps: deps, prebuf: make(map[string]struct{}), now: time.Now}
 }
 
 // source отдаёт активный источник запроса.

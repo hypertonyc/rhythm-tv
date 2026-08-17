@@ -100,13 +100,17 @@ type fakeSessions struct {
 	// «сеанса нет», как и было до появления таких тестов.
 	dir  string
 	snap *hls.Snapshot
+	// activeSnap — сеанс, который ffmpeg пишет прямо сейчас. Отдельно от snap,
+	// потому что это разные вещи: подобранный после выкатки сеанс есть в Get,
+	// но активным не является, и подрезка окна входа смотрит именно сюда.
+	activeSnap *hls.Snapshot
 }
 
 func (f *fakeSessions) Start(hls.StartOptions) (hls.Snapshot, error) { return hls.Snapshot{}, nil }
-func (f *fakeSessions) ActiveSnapshot() *hls.Snapshot                { return nil }
+func (f *fakeSessions) ActiveSnapshot() *hls.Snapshot                { return f.activeSnap }
 
-// Get отдаёт снимок, только если тест его завёл: подрезка окна входа смотрит
-// на StartedAt, а всем прежним тестам сеанс не нужен вовсе.
+// Get отдаёт снимок, только если тест его завёл: всем прежним тестам сеанс
+// не нужен вовсе.
 func (f *fakeSessions) Get(string) (hls.Snapshot, bool) {
 	if f.snap == nil {
 		return hls.Snapshot{}, false

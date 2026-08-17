@@ -89,9 +89,30 @@ func newSessionServer(t *testing.T, files map[string]string) *Server {
 	return newSessionServerAge(t, files, nil)
 }
 
-// newSessionServerAge — тот же сервер, но с живым сеансом известного возраста:
-// подрезка окна входа смотрит на StartedAt. nil означает «снимка нет».
+// newSessionServerAge — тот же сервер, но с живым АКТИВНЫМ сеансом известного
+// возраста. nil означает «активного сеанса нет».
+//
+// Возраст сеанса на подрезку больше не влияет — предохранитель отмеряется
+// от первого запроса плейлиста, — и это проверяет
+// TestJoinWindowSurvivesLateArrivingPlayer. Параметр остался затем, чтобы тому
+// тесту было чем сказать «сеанс готовился 37 секунд».
 func newSessionServerAge(t *testing.T, files map[string]string, age *time.Duration) *Server {
+	t.Helper()
+	var snap *hls.Snapshot
+	if age != nil {
+		snap = &hls.Snapshot{
+			ID:        "abc",
+			StartedAt: time.Now().Add(-*age).UnixMilli(),
+			State:     "ready",
+		}
+	}
+	return newSessionServerActive(t, files, snap)
+}
+
+// newSessionServerActive — сервер с каталогом сеанса и произвольным ответом
+// на ActiveSnapshot: активным может быть и другой сеанс, не тот, чей плейлист
+// спрашивают (так выглядит подобранный после выкатки).
+func newSessionServerActive(t *testing.T, files map[string]string, active *hls.Snapshot) *Server {
 	t.Helper()
 	dir := t.TempDir()
 	for name, content := range files {
@@ -99,17 +120,19 @@ func newSessionServerAge(t *testing.T, files map[string]string, age *time.Durati
 			t.Fatal(err)
 		}
 	}
-	sessions := &fakeSessions{calls: new([]string), dir: dir}
-	if age != nil {
-		sessions.snap = &hls.Snapshot{
-			ID:        "abc",
-			StartedAt: time.Now().Add(-*age).UnixMilli(),
-			State:     "ready",
-		}
-	}
+	sessions := &fakeSessions{calls: new([]string), dir: dir, activeSnap: active}
 	calls := make([]string, 0)
 	lib := &fakeLibrary{calls: &calls, activeID: strings.Repeat("c", 40)}
 	return New(Deps{Library: lib, HLS: sessions})
+}
+
+// freezeClock подменяет часы окна входа и отдаёт ручку, которой их двигают:
+// предохранитель отмеряет секунды от первого запроса плейлиста, и ждать
+// их по-настоящему незачем.
+func freezeClock(s *Server) func(time.Duration) {
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	return func(d time.Duration) { now = now.Add(d) }
 }
 
 // TestPlayerPlaylistStartsAtBeginning — главный тест правки: плейлист, который
@@ -204,15 +227,67 @@ func TestJoinWindowOpensAfterPlayerTookSegment(t *testing.T) {
 	}
 }
 
-// TestJoinWindowFuseOpens — предохранитель. Если плеер на коротком плейлисте
-// не входит вовсе, а ждёт роста, окно обязано открыться само: потерянное начало
-// лучше вечного ожидания.
-func TestJoinWindowFuseOpens(t *testing.T) {
-	old := joinFuse + time.Second
-	s := newSessionServerAge(t, map[string]string{hls.PlaylistName: observedPlaylist()}, &old)
+// TestJoinWindowSurvivesLateArrivingPlayer — сеанс, который долго готовился.
+//
+// Телевизор ждёт в waitForHls, пока не появятся два сегмента, и к плейлисту
+// приходит только после этого. 17.08.2026 в сеансе msxf9ry6 ожидание заняло
+// 33 с (transcode на холодном рое сразу после выкатки), первый запрос плейлиста
+// пришёл на 37-й секунде — и предохранитель, отмерявший от старта сеанса, уже
+// истёк. Подрезки не было вовсе, и телевизор вошёл в seg00007, потеряв ~35 с.
+//
+// Возраст сеанса не имеет права ни на что влиять: считается время, которое
+// плеер СМОТРИТ на плейлист, а смотреть он ещё не начинал.
+func TestJoinWindowSurvivesLateArrivingPlayer(t *testing.T) {
+	late := 37 * time.Second
+	s := newSessionServerAge(t, map[string]string{hls.PlaylistName: observedPlaylist()}, &late)
 
+	served := do(s, http.MethodGet, "/hls/abc/"+hls.PlaylistName, nil).Body.String()
+	if got := firmwareJoin(served); got != "seg00000.ts" {
+		t.Errorf("прошивка вошла бы в %q, а не в начало серии\nотдано:\n%s", got, served)
+	}
+	if n := strings.Count(served, ".ts\n"); n != 7 {
+		t.Errorf("в окне %d сегментов, ожидалось 7 (32.491 с при бюджете 33)", n)
+	}
+}
+
+// TestJoinFuseCountsFromFirstLook — предохранитель. Если плеер на коротком
+// плейлисте не входит вовсе, а ждёт роста, окно обязано открыться само:
+// потерянное начало лучше вечного ожидания.
+//
+// Отсчёт идёт от первого взгляда на плейлист, поэтому проверяется парой:
+// сразу подрезано, через joinFuse после первого запроса — открыто.
+func TestJoinFuseCountsFromFirstLook(t *testing.T) {
+	fresh := 2 * time.Second
+	s := newSessionServerAge(t, map[string]string{hls.PlaylistName: observedPlaylist()}, &fresh)
+	advance := freezeClock(s)
+
+	if n := strings.Count(do(s, http.MethodGet, "/hls/abc/"+hls.PlaylistName, nil).Body.String(), ".ts\n"); n != 7 {
+		t.Fatalf("на первом запросе отдано %d сегментов, ожидалось 7", n)
+	}
+	advance(joinFuse - time.Second)
+	if n := strings.Count(do(s, http.MethodGet, "/hls/abc/"+hls.PlaylistName, nil).Body.String(), ".ts\n"); n != 7 {
+		t.Errorf("до предохранителя отдано %d сегментов, ожидалось 7", n)
+	}
+	advance(2 * time.Second)
 	if n := strings.Count(do(s, http.MethodGet, "/hls/abc/"+hls.PlaylistName, nil).Body.String(), ".ts\n"); n != len(observedDurations) {
 		t.Errorf("после предохранителя отдано %d сегментов, ожидались все %d", n, len(observedDurations))
+	}
+}
+
+// TestAdoptedSessionIsNotTruncated — подобранный после выкатки сеанс подрезать
+// нельзя: его смотрят с середины, и оставить в плейлисте одно начало значило бы
+// выбить у плеера то, что он играет.
+//
+// ENDLIST тут не спасает — его нет, если прежний ffmpeg умер посреди серии.
+// Спасает то, что активным подобранный сеанс не становится (hls/adopt.go),
+// а подрезается только активный. Активен здесь ДРУГОЙ сеанс: серию досматривают,
+// а кто-то уже запустил новую.
+func TestAdoptedSessionIsNotTruncated(t *testing.T) {
+	other := &hls.Snapshot{ID: "zzz", StartedAt: time.Now().UnixMilli(), State: "ready"}
+	s := newSessionServerActive(t, map[string]string{hls.PlaylistName: observedPlaylist()}, other)
+
+	if n := strings.Count(do(s, http.MethodGet, "/hls/abc/"+hls.PlaylistName, nil).Body.String(), ".ts\n"); n != len(observedDurations) {
+		t.Errorf("подобранный сеанс подрезан до %d сегментов из %d", n, len(observedDurations))
 	}
 }
 
@@ -233,8 +308,9 @@ func TestFinishedPlaylistIsNotTruncated(t *testing.T) {
 	}
 }
 
-// TestPlaylistWithoutSessionSnapshotIsServedWhole — снимка нет, значит про
-// возраст сеанса ничего не известно; подрезать наугад нельзя.
+// TestPlaylistWithoutSessionSnapshotIsServedWhole — активного сеанса нет,
+// значит ffmpeg ничего не пишет и подрезать нечего: плейлист больше не растёт,
+// и правило входа на нём — не наша забота.
 func TestPlaylistWithoutSessionSnapshotIsServedWhole(t *testing.T) {
 	s := newSessionServer(t, map[string]string{hls.PlaylistName: observedPlaylist()})
 
