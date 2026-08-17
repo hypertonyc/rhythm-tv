@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/storage"
 )
 
 // Client — единственное место в проекте, которое знает про anacrolix/torrent.
@@ -21,7 +22,12 @@ import (
 // на каждый торрент завести нельзя — ListenPort фиксирован (TORRENT_PORT),
 // и второй клиент не занял бы порт, пока первый жив.
 type Client struct {
-	client       *torrent.Client
+	client *torrent.Client
+	// store закрывается руками: когда DefaultStorage задан снаружи,
+	// torrent.NewClient не берёт его закрытие на себя (client.go делает это
+	// только для хранилища, созданного им самим). Закрыть надо, чтобы
+	// корректно лёг .torrent.bolt.db с отметками готовности кусков.
+	store        storage.ClientImplCloser
 	dataDir      string
 	persistStore bool
 	readahead    int64
@@ -85,8 +91,14 @@ func NewClient(opts Options) (*Client, error) {
 		cfg.ListenPort = opts.ListenPort
 	}
 
+	// Хранилище задаётся явно ТОЛЬКО ради выключения part-файлов: на умолчании
+	// библиотеки они молча уничтожают уже скачанные серии. См. partfile.go.
+	store := newStore(opts.DataDir)
+	cfg.DefaultStorage = store
+
 	client, err := torrent.NewClient(cfg)
 	if err != nil {
+		store.Close()
 		return nil, fmt.Errorf("torrent client: %w", err)
 	}
 
@@ -95,6 +107,7 @@ func NewClient(opts Options) (*Client, error) {
 	}
 	return &Client{
 		client:       client,
+		store:        store,
 		dataDir:      opts.DataDir,
 		persistStore: opts.PersistStore,
 		readahead:    opts.Readahead,
@@ -203,6 +216,11 @@ func (c *Client) Add(torrentPath string) (*Torrent, error) {
 func (c *Client) Close() error {
 	if c.client != nil {
 		c.client.Close()
+	}
+	// Строго после клиента: пока он жив, он пишет отметки готовности кусков,
+	// а закрытие хранилища закрывает .torrent.bolt.db, куда они ложатся.
+	if c.store != nil {
+		c.store.Close()
 	}
 	if c.dataDir != "" && !c.persistStore {
 		os.RemoveAll(c.dataDir)
