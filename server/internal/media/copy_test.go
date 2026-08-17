@@ -14,18 +14,21 @@ func TestCanCopyVideo(t *testing.T) {
 	cases := []struct {
 		name  string
 		mut   func(*VideoInfo)
-		start float64
+		seek  SeekPoint
 		allow bool
 		want  bool
 	}{
 		{name: "эталонный h264 high", allow: true, want: true},
 		{name: "выключено через HLS_ALLOW_COPY=0", allow: false, want: false},
 
-		// Перемотка всегда форсирует перекодирование: output-side seek режет
-		// поток не по ключевому кадру.
-		{name: "перемотка запрещает копирование", start: 30, allow: true, want: false},
-		{name: "start в пределах порога 0.05", start: 0.05, allow: true, want: true},
-		{name: "start чуть выше порога", start: 0.051, allow: true, want: false},
+		// Перемотку решает не сам факт перемотки, а выравнивание: копия
+		// начинается только с ключевого кадра.
+		{name: "перемотка мимо ключевого кадра", seek: SeekPoint{Start: 30}, allow: true, want: false},
+		{name: "перемотка на ключевой кадр", seek: SeekPoint{Start: 30, OnKeyframe: true}, allow: true, want: true},
+		{name: "start в пределах порога 0.05", seek: SeekPoint{Start: 0.05}, allow: true, want: true},
+		{name: "start чуть выше порога", seek: SeekPoint{Start: 0.051}, allow: true, want: false},
+		{name: "HLS_ALLOW_COPY=0 сильнее выравнивания",
+			seek: SeekPoint{Start: 30, OnKeyframe: true}, allow: false, want: false},
 
 		{name: "не h264", mut: func(v *VideoInfo) { v.Codec = "hevc" }, allow: true, want: false},
 		{name: "10 бит", mut: func(v *VideoInfo) { v.PixFmt = "yuv420p10le" }, allow: true, want: false},
@@ -53,14 +56,27 @@ func TestCanCopyVideo(t *testing.T) {
 			if c.mut != nil {
 				c.mut(v)
 			}
-			if got := CanCopyVideo(v, c.start, c.allow); got != c.want {
+			if got := CanCopyVideo(v, c.seek, c.allow); got != c.want {
 				t.Errorf("CanCopyVideo = %v, ожидалось %v", got, c.want)
 			}
 		})
 	}
 
-	if CanCopyVideo(nil, 0, true) {
+	if CanCopyVideo(nil, SeekPoint{}, true) {
 		t.Error("CanCopyVideo(nil) обязан быть false")
+	}
+	if VideoFormatCopyable(nil) {
+		t.Error("VideoFormatCopyable(nil) обязан быть false")
+	}
+	// Формат смотрится отдельно от позиции: по нему решают, стоит ли вообще
+	// искать ключевой кадр перед перемоткой.
+	if !VideoFormatCopyable(safeVideo()) {
+		t.Error("эталонный h264 high обязан считаться копируемым по формату")
+	}
+	hevc := safeVideo()
+	hevc.Codec = "hevc"
+	if VideoFormatCopyable(hevc) {
+		t.Error("hevc не копируется ни с какой позиции")
 	}
 }
 
@@ -71,13 +87,14 @@ func TestCanCopyAudio(t *testing.T) {
 	cases := []struct {
 		name  string
 		mut   func(*AudioTrack)
-		start float64
+		seek  SeekPoint
 		allow bool
 		want  bool
 	}{
 		{name: "эталонный AAC-LC стерео", allow: true, want: true},
 		{name: "выключено", allow: false, want: false},
-		{name: "перемотка", start: 30, allow: true, want: false},
+		{name: "перемотка мимо ключевого кадра", seek: SeekPoint{Start: 30}, allow: true, want: false},
+		{name: "перемотка на ключевой кадр", seek: SeekPoint{Start: 30, OnKeyframe: true}, allow: true, want: true},
 		{name: "не aac", mut: func(a *AudioTrack) { a.Codec = "ac3" }, allow: true, want: false},
 		{name: "профиль в нижнем регистре", mut: func(a *AudioTrack) { a.Profile = "lc" }, allow: true, want: true},
 		{name: "моно разрешено", mut: func(a *AudioTrack) { a.Channels = 1 }, allow: true, want: true},
@@ -92,13 +109,13 @@ func TestCanCopyAudio(t *testing.T) {
 			if c.mut != nil {
 				c.mut(a)
 			}
-			if got := CanCopyAudio(a, c.start, c.allow); got != c.want {
+			if got := CanCopyAudio(a, c.seek, c.allow); got != c.want {
 				t.Errorf("CanCopyAudio = %v, ожидалось %v", got, c.want)
 			}
 		})
 	}
 
-	if CanCopyAudio(nil, 0, true) {
+	if CanCopyAudio(nil, SeekPoint{}, true) {
 		t.Error("CanCopyAudio(nil) обязан быть false")
 	}
 }
@@ -123,24 +140,52 @@ func TestCanCopyAudioWiderThanNode(t *testing.T) {
 		return a
 	}
 
-	if !CanCopyAudio(heaac51(nil), 0, true) {
+	if !CanCopyAudio(heaac51(nil), SeekPoint{}, true) {
 		t.Error("HE-AAC 5.1 обязан копироваться: Node перекодировал бы, мы — нет")
 	}
 
 	// А это расширение НЕ трогает — иначе оно перестало бы быть про AAC.
-	if CanCopyAudio(heaac51(func(a *AudioTrack) { a.Codec = "ac3" }), 0, true) {
+	if CanCopyAudio(heaac51(func(a *AudioTrack) { a.Codec = "ac3" }), SeekPoint{}, true) {
 		t.Error("AC-3 остаётся вне whitelist'а")
 	}
-	if CanCopyAudio(heaac51(func(a *AudioTrack) { a.SampleRate = 32000 }), 0, true) {
+	if CanCopyAudio(heaac51(func(a *AudioTrack) { a.SampleRate = 32000 }), SeekPoint{}, true) {
 		t.Error("частота вне 44.1/48 кГц остаётся вне whitelist'а")
 	}
-	if CanCopyAudio(heaac51(func(a *AudioTrack) { a.Channels = 0 }), 0, true) {
+	if CanCopyAudio(heaac51(func(a *AudioTrack) { a.Channels = 0 }), SeekPoint{}, true) {
 		t.Error("дорожка без каналов не разобрана ffprobe — копировать нечего")
 	}
-	if CanCopyAudio(heaac51(nil), 30, true) {
-		t.Error("перемотка гасит копирование звука независимо от профиля")
-	}
-	if CanCopyAudio(heaac51(nil), 0, false) {
+	if CanCopyAudio(heaac51(nil), SeekPoint{}, false) {
 		t.Error("HLS_ALLOW_COPY=0 сильнее расширенного whitelist'а")
+	}
+}
+
+// TestCopyOnAlignedSeekDivergesFromNode — второе осознанное расхождение
+// с эталоном, добавленное 18.08.2026.
+//
+// В Node любой ненулевой start уводил в libx264 обе дорожки, и мы это
+// повторяли. Запрет был не суеверием — копию нельзя начать с середины GOP, —
+// но лечится он не перекодированием, а тем, что точку сначала подтягивают
+// на ключевой кадр (SeekPoint.OnKeyframe, см. KeyframeFinder). Выровненная
+// перемотка копируется, невыровненная по-прежнему перекодируется, поэтому
+// сценарии в args_scenarios.json (там выравнивания нет) с эталоном сходятся.
+//
+// Добавлять в них выровненную перемотку НЕЛЬЗЯ: эталон ответит transcode.
+func TestCopyOnAlignedSeekDivergesFromNode(t *testing.T) {
+	aligned := SeekPoint{Start: 1234.5678, OnKeyframe: true}
+	raw := SeekPoint{Start: 1234.5678}
+
+	if !CanCopyVideo(safeVideo(), aligned, true) {
+		t.Error("выровненная перемотка обязана копироваться: Node перекодировал бы")
+	}
+	if CanCopyVideo(safeVideo(), raw, true) {
+		t.Error("невыровненная перемотка обязана перекодироваться, как в Node")
+	}
+
+	track := &AudioTrack{Codec: "aac", Profile: "LC", Channels: 2, SampleRate: 48000}
+	if !CanCopyAudio(track, aligned, true) {
+		t.Error("звук копируется там же, где копируется видео")
+	}
+	if CanCopyAudio(track, raw, true) {
+		t.Error("без выравнивания звук остаётся при поведении эталона")
 	}
 }

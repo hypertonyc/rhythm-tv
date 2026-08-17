@@ -48,6 +48,11 @@ type Manager struct {
 	AllowCopy bool
 	// RawURL отдаёт адрес, по которому ffmpeg читает файл через наш HTTP.
 	RawURL func(index int) string
+	// Keyframe отдаёт время последнего ключевого кадра не позже start —
+	// им перемотка подтягивается на границу GOP, без чего её нельзя копировать
+	// (см. media.KeyframeFinder). nil означает «не искать»: сеанс тогда ведёт
+	// себя как до 18.08.2026 и перекодирует любую перемотку.
+	Keyframe func(index, videoIndex int, start float64) (float64, bool)
 	// Downloaded — текущий счётчик скачанного, для downloadedSinceStart.
 	Downloaded func() int64
 	// NowMilli подменяется в тестах; иначе time.Now().UnixMilli.
@@ -83,6 +88,13 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 		subtitle = media.ChooseSubtitle(meta.Subtitles, opts.SubPref)
 	}
 
+	// Дальше по всему методу идёт seek.Start, а не opts.Start: попросили одну
+	// секунду, а сеанс живёт с другой, подтянутой к ключевому кадру. Разница
+	// невелика (в среднем половина GOP, на «Друзьях» это ~2.5 с назад),
+	// но она обязана быть ОДНОЙ на весь сеанс: на неё сдвигаются метки внешних
+	// субтитров, от неё считается -ss, её же телевизор получает в снимке.
+	seek := m.alignSeek(opts, meta.Video)
+
 	id := m.newID()
 	dir := filepath.Join(m.tmpDir(), "tms-hls-"+id)
 
@@ -100,14 +112,14 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 	// Неудача не повод не показывать серию: пропавший или битый файл гасит
 	// дорожку и только её.
 	if subtitle.External() {
-		if err := subs.WriteSession(dir, subtitle.SourcePath, opts.Start, meta.Duration); err != nil {
+		if err := subs.WriteSession(dir, subtitle.SourcePath, seek.Start, meta.Duration); err != nil {
 			log.Printf("HLS [%d] субтитры %s: %v", opts.Index, subtitle.SourcePath, err)
 			subtitle = nil
 		}
 	}
 
-	copyVideo := media.CanCopyVideo(meta.Video, opts.Start, m.AllowCopy)
-	copyAudio := audio != nil && media.CanCopyAudio(audio, opts.Start, m.AllowCopy)
+	copyVideo := media.CanCopyVideo(meta.Video, seek, m.AllowCopy)
+	copyAudio := audio != nil && media.CanCopyAudio(audio, seek, m.AllowCopy)
 
 	args := BuildArgs(Params{
 		RawURL:     m.RawURL(opts.Index),
@@ -115,7 +127,7 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 		VideoIndex: meta.Video.Index,
 		Audio:      audio,
 		Subtitle:   subtitle,
-		Start:      opts.Start,
+		Start:      seek.Start,
 		CopyVideo:  copyVideo,
 		CopyAudio:  copyAudio,
 	})
@@ -135,7 +147,7 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 	log.Printf("HLS [%d] audio=%s sub=%s start=%s video=%s audio-mode=%s mode=%s",
 		opts.Index, codeOr(audio != nil, audioCode(audio), "none"),
 		codeOr(subtitle != nil, subCode(subtitle), "off"),
-		jscompat.ToFixed(opts.Start, 1), videoMode, audioMode,
+		jscompat.ToFixed(seek.Start, 1), videoMode, audioMode,
 		codeOr(subtitle != nil, codeOr(subtitle.External(), "webvtt-file", "webvtt"), "no-subs"))
 
 	// Дальше — один блок под локом, без единой точки ожидания внутри.
@@ -165,7 +177,7 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 		sub:               codeOr(subtitle != nil, subCode(subtitle), "off"),
 		videoMode:         videoMode,
 		audioMode:         audioMode,
-		start:             opts.Start,
+		start:             seek.Start,
 		downloadedAtStart: m.downloaded(),
 		startedAt:         m.now(),
 		phase:             phasePreparing,
@@ -207,6 +219,44 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 	go m.wait(s, cmd)
 
 	return m.snapshotLocked(s), nil
+}
+
+// keyframeLead — на сколько раньше найденного ключевого кадра ставится -ss.
+//
+// Отступ обязателен, и это измерено 18.08.2026, а не подстраховка: -ss ровно
+// на pts ключевого кадра САМ КАДР НЕ ВКЛЮЧАЕТ. На s03e23 «Друзей» с ключевыми
+// кадрами 1190.773 и 1198.572 запрос -ss 1190.773 дал первый видеокадр
+// на 7.8 с позже — ffmpeg отбросил кадр на границе и уехал к следующему,
+// то есть выравнивание без отступа делало ровно ту дырку, ради которой
+// затевалось. С -ss 1190.673 первый кадр приходит сразу.
+//
+// Величина некритична сверху: промахнувшись назад через предыдущий ключевой
+// кадр, мы начнём с него — раньше на десятую секунды, без всякой дырки.
+// Критична снизу, поэтому не микроскопическая: pts в контейнере и pts
+// в выводе ffprobe округляются по-разному.
+const keyframeLead = 0.1
+
+// alignSeek подтягивает запрошенную секунду на ключевой кадр — единственное,
+// что отделяет перемотку копированием от перемотки через libx264.
+//
+// ffprobe тут не запускается впустую: если формат исходника всё равно не
+// копируется (не h264, 10 бит, чересстрочка) или копирование выключено
+// рычагом, точка остаётся как просили, и сеанс идёт перекодированием,
+// где выравнивание не нужно — libx264 попадает в запрошенную секунду точно.
+func (m *Manager) alignSeek(opts StartOptions, v *media.VideoInfo) media.SeekPoint {
+	seek := media.SeekPoint{Start: opts.Start}
+	if seek.AtStart() || m.Keyframe == nil || !m.AllowCopy || !media.VideoFormatCopyable(v) {
+		return seek
+	}
+	kf, ok := m.Keyframe(opts.Index, v.Index, seek.Start)
+	if !ok {
+		return seek
+	}
+	start := kf - keyframeLead
+	if start < 0 {
+		start = 0
+	}
+	return media.SeekPoint{Start: start, OnKeyframe: true}
 }
 
 // monitor раз в 500 мс пересчитывает готовые сегменты.

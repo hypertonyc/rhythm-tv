@@ -14,18 +14,32 @@ var h264SafeProfiles = map[string]bool{
 }
 
 // seekForcesTranscode — порог, ниже которого start считается нулевым.
-//
-// Output-side seek режет поток не по ключевому кадру, а вставить свои
-// ключевые кадры в копируемый поток нельзя — при перемотке только
-// перекодирование. Тот же порог гасит и копирование звука.
 const seekForcesTranscode = 0.05
 
-// CanCopyVideo — canCopyVideo(video, start).
-func CanCopyVideo(v *VideoInfo, start float64, allowCopy bool) bool {
-	if !allowCopy || v == nil {
-		return false
-	}
-	if start > seekForcesTranscode {
+// SeekPoint — точка, с которой ffmpeg вырежет поток, и знание о том, попадает
+// ли она на ключевой кадр.
+//
+// Флаг несёт всю разницу между «перемотку можно скопировать» и «нельзя».
+// Копируемый поток начинается только с ключевого кадра: попроси произвольную
+// секунду — и ffmpeg доедет до следующего ключевого кадра сам, отдав до GOP
+// секунд звука без картинки (см. KeyframeFinder). Поэтому позицию сначала
+// подтягивают на ключевой кадр, и только выровненная разрешает копирование.
+type SeekPoint struct {
+	Start float64
+	// OnKeyframe — Start подтянут к ключевому кадру, то есть первый же пакет
+	// видео будет ключевым.
+	OnKeyframe bool
+}
+
+// AtStart — точка равна нулю или практически нулю, и ключевой кадр там есть
+// сам собой: это начало файла.
+func (s SeekPoint) AtStart() bool { return s.Start <= seekForcesTranscode }
+
+// VideoFormatCopyable — годится ли формат ИСХОДНИКА к копированию, безотносительно
+// позиции. Вынесено из CanCopyVideo отдельно, чтобы не гонять ffprobe за ключевым
+// кадром там, где видео всё равно поедет через libx264.
+func VideoFormatCopyable(v *VideoInfo) bool {
+	if v == nil {
 		return false
 	}
 	if v.Codec != "h264" || v.PixFmt != "yuv420p" {
@@ -48,6 +62,23 @@ func CanCopyVideo(v *VideoInfo, start float64, allowCopy bool) bool {
 		return false
 	}
 	return true
+}
+
+// CanCopyVideo — canCopyVideo(video, start), но перемотка больше не запрещает
+// копирование сама по себе: запрещает НЕВЫРОВНЕННАЯ перемотка.
+//
+// До 18.08.2026 любой ненулевой start уводил обе дорожки в libx264, и это
+// стоило 15-20 секунд чёрного экрана на каждое нажатие кнопки. Измерено
+// в тот день на проде, s03e23 «Друзей» (h264 High@4.1 768x432 — формат,
+// который при старте с нуля копируется): 40 секунд материала — 30.2 с CPU
+// перекодированием против 0.08 с копированием. Причина запрета была в том,
+// что копию нельзя начать с середины GOP; чинится это не перекодированием,
+// а выравниванием точки на ключевой кадр (см. SeekPoint и KeyframeFinder).
+func CanCopyVideo(v *VideoInfo, seek SeekPoint, allowCopy bool) bool {
+	if !allowCopy || !VideoFormatCopyable(v) {
+		return false
+	}
+	return seek.AtStart() || seek.OnKeyframe
 }
 
 // CanCopyAudio — canCopyAudio(track, start), но ШИРЕ эталона: копируется любой
@@ -80,11 +111,18 @@ func CanCopyVideo(v *VideoInfo, start float64, allowCopy bool) bool {
 //
 // Выигрыш измерен на s03e18: 600 с материала — 19.4 с CPU с перекодированием
 // звука против 0.29 с с копированием (видео копируется в обоих случаях).
-func CanCopyAudio(t *AudioTrack, start float64, allowCopy bool) bool {
+// Позиция смотрится ровно та же, что у видео, хотя звуку ключевые кадры
+// не нужны вовсе: он режется по границе фрейма (у AAC это 21 мс) и с любой
+// секунды начинается там, где попросили. Копировать его отдельно от видео
+// незачем — если поток всё равно идёт через libx264, выигрыш от одной дорожки
+// невелик (19.4 с CPU на 600 с материала), а расхождение с Node-эталоном
+// выросло бы на ровном месте: в args_scenarios.json есть перемотка
+// с копируемым AAC, и эталон отвечает на неё transcode.
+func CanCopyAudio(t *AudioTrack, seek SeekPoint, allowCopy bool) bool {
 	if !allowCopy || t == nil {
 		return false
 	}
-	if start > seekForcesTranscode {
+	if !seek.AtStart() && !seek.OnKeyframe {
 		return false
 	}
 	if t.Codec != "aac" {

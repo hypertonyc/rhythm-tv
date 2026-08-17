@@ -140,9 +140,21 @@ func main() {
 		log.Printf("библиотека %s: активен %q (%s)", libDir, entry.Name, entry.ID)
 	}
 
+	// Поиск ключевого кадра перед перемоткой. Свой таймаут, много меньше
+	// разборного: не нашли быстро — перекодируем, как раньше, а ждать тут
+	// дольше, чем стоит сам сеанс копированием, значит менять быструю
+	// перемотку на медленную. На проде скан занимает ~165 мс.
+	keyframes := &media.KeyframeFinder{
+		RawURL:  rawURL,
+		Timeout: time.Duration(envInt("KEYFRAME_TIMEOUT_MS", 8000)) * time.Millisecond,
+	}
+
 	manager := &hls.Manager{
 		AllowCopy: allowCopy,
 		RawURL:    rawURL,
+		Keyframe: func(index, videoIndex int, start float64) (float64, bool) {
+			return keyframes.Before(ctx, index, videoIndex, start)
+		},
 		// Счётчик берётся у активного торрента на каждый вызов: после
 		// переключения downloadedSinceStart должен считаться по новому.
 		Downloaded: func() int64 {
