@@ -4,10 +4,13 @@
 # и вручную — для отката на любой прошлый sha.
 #
 # Настоящий zero-downtime здесь недостижим и гнаться за ним не надо: всё
-# состояние сеанса лежит в процессе, сегменты — в томе под случайным id,
-# и новый контейнер отдаст 404 на старый id сеанса. Дефицитный ресурс тут
-# не аптайм, а «не оборвать человека на диване», и именно это закрывает
-# шаг «идёт ли воспроизведение» ниже.
+# состояние сеанса лежит в процессе. Но и обрыв просмотра здесь не считается
+# ценой, которую надо предотвращать: сервер смотрит один человек, каталог
+# сеанса переживает перезапуск (новый процесс его подбирает — см. `hls/adopt.go`),
+# так что худшее — секунды чёрного экрана. Поэтому гейта «не выкатывать, если
+# смотрят» тут нет: он стоял до 20.08.2026 и стоил больше, чем спасал —
+# выкатка падала, и её приходилось перезапускать руками с force=true.
+# Проверить, смотрят ли, по-прежнему можно вручную: `ssh <vps> playback`.
 name: deploy
 
 on:
@@ -17,11 +20,6 @@ on:
         description: 'Тег образа — sha коммита'
         required: true
         type: string
-      force:
-        description: 'Выкатывать, даже если идёт воспроизведение'
-        required: false
-        type: boolean
-        default: false
   workflow_dispatch:
     inputs:
       image_tag:
@@ -29,10 +27,6 @@ on:
         required: false
         type: string
         default: ''
-      force:
-        description: 'Выкатывать, даже если идёт воспроизведение (обрвёт серию)'
-        type: boolean
-        default: false
 
 concurrency:
   # Деплои становятся в очередь и НЕ отменяются: отмена между подменой .env
@@ -87,20 +81,6 @@ jobs:
           printf '%s\n' '${{ secrets.DEPLOY_KNOWN_HOSTS }}' > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
-      - name: не выкатывать, если смотрят
-        if: ${{ !inputs.force }}
-        run: |
-          set -euo pipefail
-          PLAYBACK="$(ssh -p '${{ secrets.DEPLOY_PORT }}' \
-            '${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}' playback)"
-          echo "воспроизведение: $PLAYBACK"
-          if [ "$PLAYBACK" != 'idle' ]; then
-            echo '::error::идёт сеанс — редеплой убьёт ffmpeg посреди серии.'
-            echo '::error::Образ уже в GHCR, ничего не потеряно. Перезапустите деплой позже'
-            echo '::error::или вручную с force=true.'
-            exit 1
-          fi
-
       - name: выкатить
         run: |
           set -euo pipefail
@@ -130,6 +110,6 @@ jobs:
             echo '```sh'
             echo 'ssh -i ~/.ssh/tms-deploy tmsdeploy@<vps> rollback'
             echo '# или'
-            echo 'gh workflow run deploy.yml -f image_tag=<прошлый-sha> -f force=true'
+            echo 'gh workflow run deploy.yml -f image_tag=<прошлый-sha>'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

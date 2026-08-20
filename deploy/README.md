@@ -1,8 +1,6 @@
 # Деплой
 
 Пуш в `main` → сборка образа → GHCR → SSH на VPS → `docker compose up -d`.
-Перед выкаткой пайплайн спрашивает сервер, не смотрит ли кто-нибудь серию,
-и отказывается деплоить, если смотрит.
 
 ```
 push main
@@ -11,9 +9,18 @@ server.yml:  gofmt, go vet, go test -race
   ↓
              docker buildx → ghcr.io/<repo>/server:<sha>
   ↓
-deploy.yml:  playback == idle?
-             ├─ да  → ssh 'deploy <sha>' < deploy/compose.yaml → дымовой тест
-             └─ нет → падаем; образ уже в GHCR, ничего не потеряно
+deploy.yml:  ssh 'deploy <sha>' < deploy/compose.yaml → дымовой тест
+```
+
+**Выкатка идёт, даже если серию в этот момент смотрят.** Гейт «не выкатывать,
+если смотрят» тут стоял до 20.08.2026 и снят сознательно: сервер смотрит один
+человек, каталог сеанса перезапуск переживает (новый процесс его подбирает),
+и худшее, что видно с дивана, — секунды чёрного экрана. А цена гейта была
+настоящей: выкатка падала и требовала ручного перезапуска с `force=true`.
+Посмотреть, смотрят ли, при желании можно и так:
+
+```sh
+ssh -i ~/.ssh/tms-deploy tmsdeploy@<vps> playback   # idle | busy
 ```
 
 **Автовыкатка выключена предохранителем** `DEPLOY_ENABLED` (переменная
@@ -48,8 +55,8 @@ gh repo create hypertonyc/rhythm-tv --private --source=. --remote=origin --push
 - **Settings → Branches** — защита `main`.
 
 Правило обязательных ревьюеров на приватных репозиториях требует Pro/Team.
-На бесплатном тарифе окружение всё равно полезно (область видимости секретов),
-а роль ручного гейта играет шаг «не выкатывать, если смотрят».
+На бесплатном тарифе окружение всё равно полезно — ради области видимости
+секретов; ручного гейта перед выкаткой нет вовсе.
 
 ### 2. Ключ для деплоя
 
@@ -218,7 +225,7 @@ sudo docker stop tms-server        # stop безопасен: TORRENT_STORE_PERS
 #    chown 10001:10001. Пара «<имя> + <имя>.part» — это баг, застигнутый
 #    в работе: оставить тот файл, в котором больше блоков (stat -c %b),
 #    второй удалить.
-gh workflow run deploy.yml -f image_tag=<sha> -f force=true
+gh workflow run deploy.yml -f image_tag=<sha>
 # 3. Дождаться "verified in" в логе и вернуть TORRENT_VERIFY_ON_START=0.
 #    Перезапуск для этого не нужен: процесс читает флаг только при старте,
 #    а CI сохраняет значения .env между деплоями — и забытая единица
@@ -247,10 +254,8 @@ ssh -i ~/.ssh/tms-deploy tmsdeploy@<vps> rollback
 Из GitHub:
 
 ```sh
-gh workflow run deploy.yml -f image_tag=<прошлый-sha> -f force=true
+gh workflow run deploy.yml -f image_tag=<прошлый-sha>
 ```
-
-`force=true` при откате правильный: откатываются потому, что уже сломано.
 
 Если сломан сам `compose.yaml` — `git revert` и обычный деплой: файл едет
 на stdin каждый раз, отдельной правки на VPS нет.
