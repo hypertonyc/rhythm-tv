@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -18,6 +19,27 @@ var ErrNoVideoStream = errors.New("No video stream")
 // Request — вход одного разбора. Имя и соседние серии знает слой торрента,
 // поэтому они приходят снаружи: сам Prober про торренты ничего не знает.
 type Request struct {
+	// Scope — чей это Index, и он же ключ кэша.
+	//
+	// Сам Index — номер файла в торренте, и активный торрент переключают
+	// с телефона: тот же номер после переключения означает уже другую серию.
+	// Кэш, ключом которому один Index, отдавал бы на неё разбор ПРЕЖНЕГО
+	// сериала — 20.08.2026 на проде /api/files под индексом 159 отдавал
+	// «S08E01 - The Locomotion Interruption.mp4», а /api/probe/159 —
+	// «s05e11 - The One with All the Resolutions.mkv» с дорожками «Друзей».
+	// Наружу это выглядело так: картинка и звук от нового сериала, а имя
+	// серии в HUD телевизора, длительность (по ней сторожат конец серии)
+	// и дорожка внешних субтитров (SourcePath) — от старого.
+	//
+	// Снаружи сюда кладётся путь файла в хранилище: он указывает на те самые
+	// байты, которые прочитает ffprobe, и берётся из того же снимка источника,
+	// что и Index, — то есть разъехаться с ним не может. Тот же ключ у журнала
+	// просмотров (internal/reclaim) и у лечения фантомных файлов, откуда
+	// приходит Forget.
+	//
+	// Пустой Scope оставляет прежнее поведение, «один Index — один разбор»:
+	// источник, не знающий путей в хранилище, бывает только в тестах.
+	Scope string
 	Index int
 	Name  string
 	Next  *int
@@ -45,8 +67,21 @@ type Prober struct {
 	// Binary — имя ffprobe; подменяется в тестах.
 	Binary string
 
-	mu      sync.Mutex
-	entries map[int]*probeEntry
+	mu sync.Mutex
+	// entries — разбор по Request.Scope, а НЕ по индексу файла. См. Scope.
+	entries map[string]*probeEntry
+}
+
+// cacheKey — ключ кэша одного разбора.
+//
+// Индекс участвует только как запасной вариант: источник без путей
+// в хранилище — это Fake из тестов, там торрент один, и прежнее поведение
+// («один индекс — один разбор») для него верно.
+func cacheKey(req Request) string {
+	if req.Scope != "" {
+		return req.Scope
+	}
+	return "#" + strconv.Itoa(req.Index)
 }
 
 type probeEntry struct {
@@ -62,11 +97,13 @@ type probeEntry struct {
 // после ошибки следующий запрос пробует заново. На торренте без пиров это
 // разница между «подождать и получить фильм» и «залипнуть навсегда».
 func (p *Prober) Probe(ctx context.Context, req Request) (*Result, error) {
+	key := cacheKey(req)
+
 	p.mu.Lock()
 	if p.entries == nil {
-		p.entries = make(map[int]*probeEntry)
+		p.entries = make(map[string]*probeEntry)
 	}
-	if e, ok := p.entries[req.Index]; ok {
+	if e, ok := p.entries[key]; ok {
 		p.mu.Unlock()
 		select {
 		case <-e.ready:
@@ -76,7 +113,7 @@ func (p *Prober) Probe(ctx context.Context, req Request) (*Result, error) {
 		}
 	}
 	e := &probeEntry{ready: make(chan struct{})}
-	p.entries[req.Index] = e
+	p.entries[key] = e
 	p.mu.Unlock()
 
 	e.result, e.err = p.run(ctx, req)
@@ -84,14 +121,15 @@ func (p *Prober) Probe(ctx context.Context, req Request) (*Result, error) {
 
 	if e.err != nil {
 		p.mu.Lock()
-		delete(p.entries, req.Index)
+		delete(p.entries, key)
 		p.mu.Unlock()
 	}
 	return e.result, e.err
 }
 
 // Forget выбрасывает разобранное для одного файла, чтобы следующий запрос
-// прочитал его заново.
+// прочитал его заново. Аргумент — тот же Scope, что в Request, то есть путь
+// файла в хранилище: лечение фантомных файлов знает про файл именно это.
 //
 // Кэш успехов вечный, и это правильно ровно до тех пор, пока файл на диске
 // не меняется. Но он меняется: файл, помеченный скачанным, может оказаться
@@ -100,10 +138,10 @@ func (p *Prober) Probe(ctx context.Context, req Request) (*Result, error) {
 // pixFmt пустой. Такой разбор ложился в кэш навсегда, и телевизор показывал
 // «Subtitles: off» без возможности переключить даже после того, как файл
 // вылечили и докачали. Лечится не запретом кэша, а сбросом на починке.
-func (p *Prober) Forget(index int) {
+func (p *Prober) Forget(scope string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.entries, index)
+	delete(p.entries, scope)
 }
 
 func (p *Prober) run(ctx context.Context, req Request) (*Result, error) {

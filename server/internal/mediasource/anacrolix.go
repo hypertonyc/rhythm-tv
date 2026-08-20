@@ -33,7 +33,7 @@ type Client struct {
 	readahead    int64
 	verify       bool
 	warmupBytes  int64
-	onFileHealed func(index int)
+	onFileHealed func(storePath string)
 }
 
 // Options — настройки клиента.
@@ -72,10 +72,10 @@ type Options struct {
 	PersistStore bool
 
 	// OnFileHealed зовётся, когда с файла сняли ложную отметку готовности
-	// (см. phantom.go), с его индексом в t.Files(). Нужно, чтобы выбросить
+	// (см. phantom.go), с его путём в хранилище. Нужно, чтобы выбросить
 	// разбор ffprobe: по нулям он возвращает правдоподобный мусор, который
 	// иначе остался бы в кэше навсегда. Может быть nil.
-	OnFileHealed func(index int)
+	OnFileHealed func(storePath string)
 }
 
 const defaultReadahead = 8 << 20

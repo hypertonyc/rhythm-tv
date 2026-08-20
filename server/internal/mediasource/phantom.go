@@ -66,7 +66,7 @@ func isPhantom(length, allocated int64) bool {
 // watchPhantomFiles повторяет проверку, пока жив торрент. Выходит по отмене
 // контекста — он закрывается вместе с торрентом, так что снятый торрент
 // горутину за собой не оставляет.
-func watchPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string, onHealed func(index int)) {
+func watchPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string, onHealed func(storePath string)) {
 	ticker := time.NewTicker(phantomInterval)
 	defer ticker.Stop()
 	for {
@@ -85,16 +85,18 @@ func watchPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string, 
 // подозрительных файлов. Недостающее после этого докачается по требованию,
 // как и любые другие отсутствующие куски.
 //
-// onHealed зовётся на каждый вылеченный файл с его индексом — тем самым,
-// по которому файл спрашивают снаружи (порядок t.Files() наружу не меняется).
-// Нужен он для сброса кэша ffprobe: разбор нулей выглядит как успех
-// и оставался бы в кэше навсегда. Может быть nil.
+// onHealed зовётся на каждый вылеченный файл с его путём в хранилище — тем же
+// ключом, которым помечен разбор этого файла (media.Request.Scope) и отметка
+// о просмотре (internal/reclaim). Индекс для этого не годится: он принадлежит
+// торренту, а торрентов в библиотеке много, и сброс по индексу задевал бы
+// чужую серию в другом торренте. Нужен колбэк для сброса кэша ffprobe: разбор
+// нулей выглядит как успех и оставался бы в кэше навсегда. Может быть nil.
 //
 // Возвращает число вылеченных файлов — ради теста и лога, больше это никому
 // не нужно.
-func healPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string, onHealed func(index int)) int {
+func healPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string, onHealed func(storePath string)) int {
 	healed := 0
-	for index, f := range t.Files() {
+	for _, f := range t.Files() {
 		if f.BytesCompleted() != f.Length() {
 			// Файл и так не считается целым: недостающее докачается само,
 			// перепроверять нечего.
@@ -121,7 +123,7 @@ func healPhantomFiles(ctx context.Context, t *torrent.Torrent, dataDir string, o
 		}
 		healed++
 		if onHealed != nil {
-			onHealed(index)
+			onHealed(f.Path())
 		}
 		log.Printf("phantom file %q: после перепроверки числится %s",
 			f.Path(), humanBytes(f.BytesCompleted()))
