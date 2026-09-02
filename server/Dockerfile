@@ -30,6 +30,16 @@ COPY --from=build /out/server /usr/local/bin/server
 ENV TORRENT_STORE=/var/lib/tms/store \
     TMPDIR=/var/lib/tms/hls \
     PORT=8000
+
+# Хранилище anacrolix обязано читать и писать классическим путём, а не через
+# mmap. На умолчании (mmap) отображение файла живёт до конца процесса и держит
+# inode удалённого файла, поэтому чистка места (internal/reclaim) не освобождает
+# ни байта, оставаясь снаружи совершенно исправной. Переменная стоит здесь,
+# а не задаётся из кода, потому что её читает init() пакета storage — то есть
+# раньше main, и os.Setenv туда уже не успевает.
+# Подробно: internal/mediasource/fileio.go.
+ENV TORRENT_STORAGE_DEFAULT_FILE_IO=classic
+
 RUN mkdir -p /var/lib/tms/store /var/lib/tms/hls \
     && chown -R 10001:10001 /var/lib/tms
 

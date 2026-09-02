@@ -93,6 +93,9 @@ func NewClient(opts Options) (*Client, error) {
 
 	// Хранилище задаётся явно ТОЛЬКО ради выключения part-файлов: на умолчании
 	// библиотеки они молча уничтожают уже скачанные серии. См. partfile.go.
+	// А вот КАКИМ СПОСОБОМ оно читает и пишет файлы, опциями не задаётся вовсе,
+	// только окружением, и умолчание там ломает чистку места. См. fileio.go.
+	warnUnlessClassicFileIo()
 	store := newStore(opts.DataDir)
 	cfg.DefaultStorage = store
 
@@ -127,6 +130,7 @@ func (c *Client) Add(torrentPath string) (*Torrent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("add torrent: %w", err)
 	}
+	t.SetOnWriteChunkError(onWriteChunkError(t.Name()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tr := &Torrent{
