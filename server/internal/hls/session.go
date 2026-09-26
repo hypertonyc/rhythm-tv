@@ -49,6 +49,10 @@ type Session struct {
 	segments     int
 	bytesOut     int64
 	lastOutputAt *int64
+	// От них меряется скорость выдачи для запаса перед стартом (lead.go).
+	firstOutputAt   int64
+	firstOutputSegs int
+	duration        float64
 	// nextSeq — номер следующего ожидаемого сегмента. nil означает «ещё не знаем,
 	// с какого номера ffmpeg начал»; см. pollSegments.
 	nextSeq *int
@@ -125,7 +129,8 @@ type Progress struct {
 	Segments int     `json:"segments"`
 
 	// StartupSegments и StartupTargetMs — то, чего ждёт клиент перед первой
-	// картинкой: два сегмента, то есть 8 секунд видео. Цифры уезжают наружу,
+	// картинкой: обычно два сегмента, то есть 8 секунд видео, а у медленного
+	// перекодирования — запас до конца серии (lead.go). Цифры уезжают наружу,
 	// а не зашиваются в клиента, чтобы правка -hls_time не сделала прогресс
 	// на экране враньём.
 	StartupSegments int   `json:"startupSegments"`

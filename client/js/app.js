@@ -962,6 +962,13 @@
             waitProgress.encodedMs !== undefined && waitProgress.startupTargetMs > 0);
     }
 
+    /* Медленное перекодирование сервер просит переждать дольше двух сегментов,
+     * чтобы серия потом не вставала (см. hls/lead.go). Без /api/pipeline — два. */
+    function startupSegmentsNeeded() {
+        var n = waitProgress ? Number(waitProgress.startupSegments) || 0 : 0;
+        return n > 2 ? n : 2;
+    }
+
     /* Чем сервер занят прямо сейчас. Разница между «тянем с роя»
      * и «перекодируем» несущая: в первом случае ждать дольше и виноват
      * не процессор, а рой — и это единственное, что человек может починить сам
@@ -979,7 +986,7 @@
                 Math.round(waitProgress.startupTargetMs / 1000) + 's' + speed;
         }
         if (!s) return 'Asking the server…';
-        if ((s.segments || 0) >= 1) return 'Buffering · ' + s.segments + ' of 2 startup segments';
+        if ((s.segments || 0) >= 1) return 'Buffering · ' + s.segments + ' of ' + startupSegmentsNeeded() + ' startup segments';
         /* ffmpeg ещё не отчитался ни разу — он сидит на чтении входа.
          * Для нас это ожидание данных из роя, и сказать так честнее,
          * чем «перекодируем»: процессор тут ни при чём. */
@@ -1244,7 +1251,7 @@
              * лежат на сервере, но открывать их нельзя. Выходим молча, не трогая
              * restarting и HUD — ими распоряжается опрос, заменивший этот. */
             if (s.state === 'stopped' || s.state === 'replaced') return;
-            if ((s.segments || 0) >= 2 || s.state === 'finished') {
+            if ((s.segments || 0) >= startupSegmentsNeeded() || s.state === 'finished') {
                 openPlaylist(generation, serverBase + playlist + '?_=' + new Date().getTime());
                 return;
             }

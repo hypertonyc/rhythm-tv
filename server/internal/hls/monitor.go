@@ -62,4 +62,7 @@ func pollSegments(s *Session, now int64) {
 		*s.nextSeq++
 		s.lastOutputAt = &now
 	}
+	if s.firstOutputAt == 0 && s.segments > 0 {
+		s.firstOutputAt, s.firstOutputSegs = now, s.segments
+	}
 }

@@ -30,7 +30,8 @@ const (
 	// телевизора в тихое враньё.
 	SegmentSeconds = 4
 	// StartupSegments — сколько сегментов ждёт клиент, прежде чем открыть
-	// плейлист. Та же цифра стоит в фазе ready (см. advancePhase).
+	// плейлист. Та же цифра стоит в фазе ready (см. advancePhase); медленное
+	// перекодирование просит в /api/pipeline больше (lead.go).
 	StartupSegments = 2
 )
 
@@ -178,6 +179,7 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 		videoMode:         videoMode,
 		audioMode:         audioMode,
 		start:             seek.Start,
+		duration:          meta.Duration,
 		downloadedAtStart: m.downloaded(),
 		startedAt:         m.now(),
 		phase:             phasePreparing,
@@ -442,6 +444,8 @@ func (m *Manager) Progress(id string) (Progress, bool) {
 }
 
 func (m *Manager) progressLocked(s *Session) Progress {
+	now := m.now()
+	need := startupSegmentsFor(s, now)
 	p := Progress{
 		ID:              s.id,
 		Name:            s.name,
@@ -449,8 +453,8 @@ func (m *Manager) progressLocked(s *Session) Progress {
 		State:           s.state(),
 		Start:           s.start,
 		Segments:        s.segments,
-		StartupSegments: StartupSegments,
-		StartupTargetMs: int64(StartupSegments) * SegmentSeconds * 1000,
+		StartupSegments: need,
+		StartupTargetMs: int64(need) * SegmentSeconds * 1000,
 		Pipeline:        s.pipeline,
 	}
 	if d := m.downloaded() - s.downloadedAtStart; d > 0 {
@@ -475,7 +479,15 @@ func (m *Manager) progressLocked(s *Session) Progress {
 	// Остаток считается только до первой картинки и только когда есть чем:
 	// после старта воспроизведения ffmpeg работает вперёд без всякого срока,
 	// и «осталось N секунд» там означало бы неправду.
-	if p.EncodedMs != nil && p.Speed != nil && *p.Speed > 0 && s.segments < StartupSegments {
+	if s.segments >= need {
+		return p
+	}
+	// speed у ffmpeg — среднее с запуска процесса, вместе с декодированием
+	// до точки перемотки; замер по сегментам этого не видит и потому точнее.
+	if rate, ok := outputRate(s, now); ok {
+		eta := int64(float64((need-s.segments)*SegmentSeconds*1000) / rate)
+		p.EtaMs = &eta
+	} else if p.EncodedMs != nil && p.Speed != nil && *p.Speed > 0 {
 		if left := p.StartupTargetMs - *p.EncodedMs; left > 0 {
 			eta := int64(float64(left) / *p.Speed)
 			p.EtaMs = &eta
