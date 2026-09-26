@@ -482,6 +482,14 @@ func (m *Manager) progressLocked(s *Session) Progress {
 		speed := block.Speed
 		p.Speed = &speed
 	}
+	// ffmpeg 7+ меряет out_time по самому отстающему потоку, и редкие встроенные
+	// субтитры держат его в N/A или на последней реплике; выданные сегменты не врут.
+	if produced := int64(s.segments * SegmentSeconds * 1000); produced > 0 && (p.EncodedMs == nil || *p.EncodedMs < produced) {
+		p.EncodedMs = &produced
+	}
+	if rate, ok := outputRate(s, now); ok && p.Speed == nil {
+		p.Speed = &rate
+	}
 	// Остаток считается только до первой картинки и только когда есть чем:
 	// после старта воспроизведения ffmpeg работает вперёд без всякого срока,
 	// и «осталось N секунд» там означало бы неправду.

@@ -149,3 +149,39 @@ func TestRememberRateSkipsShortAndCopiedSessions(t *testing.T) {
 		t.Errorf("запомнено лишнее: %v", m.rates)
 	}
 }
+
+// Живой сеанс 26.09.2026 на ffmpeg 7.1: 26 сегментов, а в /api/pipeline
+// encodedMs и speed пустые — ffmpeg с редкими встроенными субтитрами писал N/A.
+func TestProgressFallsBackToSegmentsWhenFFmpegSaysNA(t *testing.T) {
+	now := int64(101000)
+	m := &Manager{NowMilli: func() int64 { return now }}
+	s := transcodingSession(1502, 0)
+	s.segments, s.firstOutputAt, s.firstOutputSegs = 26, 1000, 1
+	if _, err := s.progress.Write([]byte("out_time=N/A\nspeed=N/A\nprogress=continue\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	p := m.progressLocked(s)
+	if p.EncodedMs == nil || *p.EncodedMs != 104000 {
+		t.Errorf("encodedMs = %v, ожидалось 26 сегментов = 104000", p.EncodedMs)
+	}
+	if p.Speed == nil || *p.Speed != 1.0 {
+		t.Errorf("speed = %v, ожидалось 25·4 с за 100 с = 1.0", p.Speed)
+	}
+}
+
+func TestProgressKeepsFFmpegTimeWhenItIsAhead(t *testing.T) {
+	m := &Manager{NowMilli: func() int64 { return 101000 }}
+	s := transcodingSession(1502, 0)
+	s.segments, s.firstOutputAt, s.firstOutputSegs = 2, 1000, 1
+	if _, err := s.progress.Write([]byte("out_time=00:00:11.500000\nspeed=1.2x\nprogress=continue\n")); err != nil {
+		t.Fatal(err)
+	}
+	p := m.progressLocked(s)
+	if p.EncodedMs == nil || *p.EncodedMs != 11500 {
+		t.Errorf("encodedMs = %v, ожидалось 11500 от ffmpeg", p.EncodedMs)
+	}
+	if p.Speed == nil || *p.Speed != 1.2 {
+		t.Errorf("speed = %v, ожидалось 1.2 от ffmpeg", p.Speed)
+	}
+}
