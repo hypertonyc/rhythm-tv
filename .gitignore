@@ -5,6 +5,7 @@
 Debug/
 Release/
 .buildResult/
+.tizen-rds/
 .sign/
 *.wgt
 
