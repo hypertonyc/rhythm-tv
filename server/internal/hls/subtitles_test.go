@@ -18,10 +18,10 @@ const externalSRT = "1\n00:00:10,000 --> 00:00:12,000\nПривет\n"
 // но оставшимся время не пересчитывает.
 func TestBuildArgsIgnoresExternalSubtitle(t *testing.T) {
 	args := BuildArgs(Params{
-		RawURL:     "http://127.0.0.1:8000/raw/7",
-		Dir:        "/tmp/tms-hls-x",
-		VideoIndex: 0,
-		Audio:      &media.AudioTrack{Index: 1, Code: "eng"},
+		RawURL: "http://127.0.0.1:8000/raw/7",
+		Dir:    "/tmp/tms-hls-x",
+		Video:  &media.VideoInfo{},
+		Audio:  &media.AudioTrack{Index: 1, Code: "eng"},
 		Subtitle: &media.SubtitleTrack{
 			Index: -1, Code: "rus", Label: "Russian", SourcePath: "/subs/s01e01.srt",
 		},

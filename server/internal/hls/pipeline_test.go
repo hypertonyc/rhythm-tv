@@ -21,9 +21,8 @@ func TestDescribePipelineTranscode(t *testing.T) {
 	if want := "ac3 · 5.1 · 48.0 kHz"; p.Audio.From != want {
 		t.Errorf("audio.from = %q, ожидалось %q", p.Audio.From, want)
 	}
-	// Цель — ровно то, что стоит в videoArgs/audioArgs. Разрешение не меняется:
-	// фильтра масштабирования у нас нет вовсе, и обещать «в 1080p» было бы враньём.
-	if want := "h264 · High@4.0 · yuv420p · 3840x2160 · libx264 crf 20"; p.Video.To != want {
+	// Цель — ровно то, что стоит в videoArgs/audioArgs, включая размер из -vf.
+	if want := "h264 · High@4.0 · yuv420p · 1920x1080 · libx264 crf 20"; p.Video.To != want {
 		t.Errorf("video.to = %q, ожидалось %q", p.Video.To, want)
 	}
 	if want := "aac · LC · stereo · 48.0 kHz · 160k"; p.Audio.To != want {
@@ -96,5 +95,19 @@ func TestChannelsAndSampleRate(t *testing.T) {
 	}
 	if got := sampleRate(0); got != "" {
 		t.Errorf("sampleRate(0) = %q, ожидалась пустая строка", got)
+	}
+}
+
+func TestDescribePipelineHDR(t *testing.T) {
+	v := &media.VideoInfo{Codec: "hevc", Profile: "Main 10", Level: 153, PixFmt: "yuv420p10le",
+		Width: 3840, Height: 2160, ColorTransfer: "smpte2084"}
+
+	p := describePipeline(v, nil, false, false)
+
+	if want := "hevc · Main 10@15.3 · yuv420p10le · 3840x2160 · HDR PQ"; p.Video.From != want {
+		t.Errorf("video.from = %q, ожидалось %q", p.Video.From, want)
+	}
+	if want := "h264 · High@4.0 · yuv420p · 1280x720 · tonemap → SDR · libx264 crf 20"; p.Video.To != want {
+		t.Errorf("video.to = %q, ожидалось %q", p.Video.To, want)
 	}
 }

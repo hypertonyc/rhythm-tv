@@ -34,6 +34,15 @@ type VideoInfo struct {
 	Profile    string `json:"profile"`
 	Level      int    `json:"level"`
 	FieldOrder string `json:"fieldOrder"`
+
+	// В JSON поля нет: ответ /api/probe сверяется с Node-эталоном побайтово.
+	ColorTransfer string `json:"-"`
+}
+
+// HDR — PQ (HDR10 и базовый слой Dolby Vision profile 8) или HLG. Телевизор
+// такого не показывает, и без тонмаппинга картинка выходит серой и выцветшей.
+func (v *VideoInfo) HDR() bool {
+	return v != nil && (v.ColorTransfer == "smpte2084" || v.ColorTransfer == "arib-std-b67")
 }
 
 // AudioTrack — Index это абсолютный номер потока для `-map 0:N`,

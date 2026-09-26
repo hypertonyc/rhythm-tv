@@ -76,13 +76,13 @@ func TestBuildArgsMatchesNodeGolden(t *testing.T) {
 			}
 
 			got := BuildArgs(Params{
-				RawURL:     "http://127.0.0.1:8000/raw/" + strconv.Itoa(sc.Index),
-				Dir:        sc.Dir,
-				VideoIndex: sc.Meta.Video.Index,
-				Audio:      sc.Audio,
-				Subtitle:   sc.Subtitle,
-				Start:      sc.Start,
-				CopyVideo:  media.CanCopyVideo(sc.Meta.Video, media.SeekPoint{Start: sc.Start}, sc.AllowCopy),
+				RawURL:    "http://127.0.0.1:8000/raw/" + strconv.Itoa(sc.Index),
+				Dir:       sc.Dir,
+				Video:     sc.Meta.Video,
+				Audio:     sc.Audio,
+				Subtitle:  sc.Subtitle,
+				Start:     sc.Start,
+				CopyVideo: media.CanCopyVideo(sc.Meta.Video, media.SeekPoint{Start: sc.Start}, sc.AllowCopy),
 				CopyAudio: sc.Audio != nil &&
 					media.CanCopyAudio(sc.Audio, media.SeekPoint{Start: sc.Start}, sc.AllowCopy),
 			})
@@ -105,7 +105,7 @@ func TestBuildArgsMatchesNodeGolden(t *testing.T) {
 // но развалил бы тайминги встроенных субтитров.
 func TestBuildArgsSeekPlacement(t *testing.T) {
 	args := BuildArgs(Params{
-		RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", VideoIndex: 0, Start: 90,
+		RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", Video: &media.VideoInfo{}, Start: 90,
 	})
 	iInput, iSeek := indexOf(args, "-i"), indexOf(args, "-ss")
 	if iSeek < 0 {
@@ -122,7 +122,7 @@ func TestBuildArgsSeekPlacement(t *testing.T) {
 // TestBuildArgsOutputIsLast — плейлист обязан быть последним аргументом,
 // иначе ffmpeg примет его за значение предыдущего ключа.
 func TestBuildArgsOutputIsLast(t *testing.T) {
-	args := BuildArgs(Params{RawURL: "u", Dir: "/tmp/d", VideoIndex: 0})
+	args := BuildArgs(Params{RawURL: "u", Dir: "/tmp/d", Video: &media.VideoInfo{}})
 	if last := args[len(args)-1]; last != "/tmp/d/index.m3u8" {
 		t.Errorf("последний аргумент = %q", last)
 	}
@@ -134,7 +134,7 @@ func TestBuildArgsOutputIsLast(t *testing.T) {
 // Флаг обязан стоять ПОСЛЕ -f hls: как выходной он относится к муксеру,
 // и ffmpeg отвергает его до появления -f.
 func TestPlaylistTypeIsEvent(t *testing.T) {
-	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", VideoIndex: 0})
+	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", Video: &media.VideoInfo{}})
 	at := indexOf(args, "-hls_playlist_type")
 	if at < 0 {
 		t.Fatal("нет -hls_playlist_type: телевизор снова будет входить не в начало серии")
@@ -213,7 +213,7 @@ func stripLocalAdditions(args []string) []string {
 // после -i — ffmpeg молча его проигнорирует, и прогресс на экране телевизора
 // навсегда останется «не измерено», без единой ошибки где-либо.
 func TestProgressGoesToStdout(t *testing.T) {
-	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", VideoIndex: 0})
+	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", Video: &media.VideoInfo{}})
 	at := indexOf(args, "-progress")
 	if at < 0 {
 		t.Fatal("нет -progress: ход перекодирования измерить нечем")
@@ -231,7 +231,7 @@ func TestProgressGoesToStdout(t *testing.T) {
 // считает, сколько видео нужно до первой картинки. Разъехавшись, они дали бы
 // либо рваные сегменты, либо тихо врущий прогресс.
 func TestSegmentSecondsReachesBothPlaces(t *testing.T) {
-	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", VideoIndex: 0})
+	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", Video: &media.VideoInfo{}})
 	at := indexOf(args, "-hls_time")
 	if at < 0 || args[at+1] != strconv.Itoa(SegmentSeconds) {
 		t.Fatalf("-hls_time разошёлся с SegmentSeconds=%d: %s", SegmentSeconds, strings.Join(args, " "))
@@ -245,7 +245,7 @@ func TestSegmentSecondsReachesBothPlaces(t *testing.T) {
 // TestReconnectFlagsArePresentAndBeforeInput — флаги входные, после -i
 // ffmpeg их проигнорирует молча, и защита исчезнет незаметно.
 func TestReconnectFlagsArePresentAndBeforeInput(t *testing.T) {
-	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", VideoIndex: 0})
+	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", Video: &media.VideoInfo{}})
 	iInput := indexOf(args, "-i")
 	for _, f := range []string{"-reconnect", "-reconnect_streamed", "-reconnect_on_network_error", "-reconnect_delay_max"} {
 		at := indexOf(args, f)
@@ -255,6 +255,100 @@ func TestReconnectFlagsArePresentAndBeforeInput(t *testing.T) {
 		}
 		if at > iInput {
 			t.Errorf("%s стоит после -i: как входной флаг он будет проигнорирован", f)
+		}
+	}
+}
+
+func TestOutputFrame(t *testing.T) {
+	cases := []struct {
+		name         string
+		w, h         int
+		transfer     string
+		wantW, wantH int
+		wantScaled   bool
+	}{
+		{"1080p как есть", 1920, 1080, "", 1920, 1080, false},
+		{"1088 строк как есть", 1920, 1088, "", 1920, 1088, false},
+		{"4K SDR в 1080p", 3840, 2160, "", 1920, 1080, true},
+		{"1440p SDR в 1080p", 2560, 1440, "", 1920, 1080, true},
+		{"4K DCI упирается в ширину", 4096, 2160, "", 1920, 1012, true},
+		{"4K scope упирается в ширину", 3840, 1600, "", 1920, 800, true},
+		{"4K PQ в 720p", 3840, 2160, "smpte2084", 1280, 720, true},
+		{"4K HLG в 720p", 3840, 2160, "arib-std-b67", 1280, 720, true},
+		{"1080p PQ не уменьшается", 1920, 1080, "smpte2084", 1920, 1080, false},
+		{"неразобранный размер не трогаем", 0, 2160, "", 0, 2160, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v := &media.VideoInfo{Width: c.w, Height: c.h, ColorTransfer: c.transfer}
+			w, h, scaled := outputFrame(v)
+			if w != c.wantW || h != c.wantH || scaled != c.wantScaled {
+				t.Errorf("outputFrame(%dx%d %q) = %dx%d scaled=%v, ожидалось %dx%d scaled=%v",
+					c.w, c.h, c.transfer, w, h, scaled, c.wantW, c.wantH, c.wantScaled)
+			}
+		})
+	}
+}
+
+// TestHDRSourceIsScaledAndToneMapped — ровно тот файл, на котором 26.09.2026
+// сервер выдавал 0.28× реального времени: 4K HEVC 10-bit, PQ, Dolby Vision 8.1.
+func TestHDRSourceIsScaledAndToneMapped(t *testing.T) {
+	v := &media.VideoInfo{Index: 0, Codec: "hevc", Profile: "Main 10", Level: 153,
+		PixFmt: "yuv420p10le", Width: 3840, Height: 2160, ColorTransfer: "smpte2084"}
+	args := BuildArgs(Params{RawURL: "http://127.0.0.1:8000/raw/0", Dir: "/tmp/d", Video: v})
+	line := strings.Join(args, " ")
+
+	iInput := indexOf(args, "-i")
+	skip := indexOf(args, "-skip_loop_filter")
+	if skip < 0 || skip > iInput || args[skip+1] != "all" {
+		t.Errorf("-skip_loop_filter all обязан стоять до -i: %s", line)
+	}
+	vf := indexOf(args, "-vf")
+	if vf < iInput {
+		t.Fatalf("-vf обязан стоять после -i: %s", line)
+	}
+	filter := args[vf+1]
+	for _, want := range []string{"zscale=w=1280:h=720:", "tin=smpte2084", "tonemap=tonemap=mobius", "format=yuv420p"} {
+		if !strings.Contains(filter, want) {
+			t.Errorf("в фильтре нет %q: %s", want, filter)
+		}
+	}
+	for _, flag := range []string{"-color_primaries", "-color_trc", "-colorspace"} {
+		if at := indexOf(args, flag); at < 0 || args[at+1] != "bt709" {
+			t.Errorf("%s bt709 не выставлен: %s", flag, line)
+		}
+	}
+}
+
+func TestHDRWithinFrameIsToneMappedOnly(t *testing.T) {
+	v := &media.VideoInfo{Width: 1920, Height: 1080, PixFmt: "yuv420p10le", ColorTransfer: "arib-std-b67"}
+	args := BuildArgs(Params{RawURL: "u", Dir: "/tmp/d", Video: v})
+	if indexOf(args, "-skip_loop_filter") >= 0 {
+		t.Error("деблокинг пропускается без уменьшения кадра — это видно")
+	}
+	filter := args[indexOf(args, "-vf")+1]
+	if strings.Contains(filter, "w=") || !strings.HasPrefix(filter, "zscale=tin=arib-std-b67:") {
+		t.Errorf("фильтр для 1080p HLG: %s", filter)
+	}
+}
+
+func TestSDRSourceIsOnlyScaled(t *testing.T) {
+	v := &media.VideoInfo{Width: 3840, Height: 2160, PixFmt: "yuv420p"}
+	args := BuildArgs(Params{RawURL: "u", Dir: "/tmp/d", Video: v})
+	if filter := args[indexOf(args, "-vf")+1]; filter != "zscale=w=1920:h=1080:f=bilinear,format=yuv420p" {
+		t.Errorf("фильтр для 4K SDR: %s", filter)
+	}
+	if indexOf(args, "-color_trc") >= 0 {
+		t.Error("метки цвета у SDR трогать незачем")
+	}
+}
+
+func TestCopiedVideoGetsNoFilter(t *testing.T) {
+	v := &media.VideoInfo{Width: 3840, Height: 2160, ColorTransfer: "smpte2084"}
+	args := BuildArgs(Params{RawURL: "u", Dir: "/tmp/d", Video: v, CopyVideo: true})
+	for _, flag := range []string{"-vf", "-skip_loop_filter", "-color_trc"} {
+		if indexOf(args, flag) >= 0 {
+			t.Errorf("%s при копировании видео: %s", flag, strings.Join(args, " "))
 		}
 	}
 }

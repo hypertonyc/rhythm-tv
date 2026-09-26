@@ -126,3 +126,30 @@ func TestParseProbeNextPrevArePresentNulls(t *testing.T) {
 		t.Errorf("next/prev сериализованы неверно: %s", s)
 	}
 }
+
+// TestParseProbeColorTransferStaysOffTheWire — признак HDR нужен сборке
+// аргументов ffmpeg, но /api/probe сверяется с Node-эталоном побайтово.
+func TestParseProbeColorTransferStaysOffTheWire(t *testing.T) {
+	raw := []byte(`{
+	  "streams": [
+	    {"index":0,"codec_type":"video","codec_name":"hevc","width":3840,"height":2160,
+	     "level":153,"pix_fmt":"yuv420p10le","profile":"Main 10","color_transfer":"smpte2084"}
+	  ],
+	  "format": {"duration": "1502.144"}
+	}`)
+
+	r, err := ParseProbe(raw, 0, "x.mkv", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Video.ColorTransfer != "smpte2084" || !r.Video.HDR() {
+		t.Errorf("color_transfer не разобран: %+v", r.Video)
+	}
+	out, err := jscompat.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "smpte2084") {
+		t.Errorf("color_transfer утёк в ответ /api/probe: %s", out)
+	}
+}

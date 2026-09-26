@@ -29,6 +29,7 @@ type probeStream struct {
 	PixFmt      string         `json:"pix_fmt"`
 	Level       any            `json:"level"`
 	FieldOrder  string         `json:"field_order"`
+	ColorTrc    string         `json:"color_transfer"`
 	Channels    any            `json:"channels"`
 	SampleRate  any            `json:"sample_rate"`
 	Tags        map[string]any `json:"tags"`
@@ -93,6 +94,8 @@ func ParseProbe(raw []byte, index int, name string, next, prev *int) (*Result, e
 				Profile:    stringOr(s.Profile),
 				Level:      int(jscompat.NumberAnyOr0(s.Level)),
 				FieldOrder: s.FieldOrder,
+
+				ColorTransfer: s.ColorTrc,
 			}
 		}
 	}

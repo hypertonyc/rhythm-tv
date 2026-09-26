@@ -32,14 +32,14 @@ type Params struct {
 	// RawURL — http://127.0.0.1:<PORT>/raw/<index>. ffmpeg читает торрент
 	// петлёй через наш же HTTP-сервер, и заменять это на pipe нельзя:
 	// на каждой перемотке ffmpeg рвёт ответ и делает новый GET с новым Range.
-	RawURL     string
-	Dir        string
-	VideoIndex int
-	Audio      *media.AudioTrack
-	Subtitle   *media.SubtitleTrack
-	Start      float64
-	CopyVideo  bool
-	CopyAudio  bool
+	RawURL    string
+	Dir       string
+	Video     *media.VideoInfo
+	Audio     *media.AudioTrack
+	Subtitle  *media.SubtitleTrack
+	Start     float64
+	CopyVideo bool
+	CopyAudio bool
 }
 
 // BuildArgs собирает argv для ffmpeg.
@@ -94,6 +94,12 @@ func BuildArgs(p Params) []string {
 		"-reconnect_delay_max", "30",
 	)
 
+	// Деблокинг 4K съедает четверть времени декодера, а уменьшение кадра всё равно
+	// его размывает: PSNR с ним и без него — 46 дБ.
+	if _, _, scaled := outputFrame(p.Video); scaled && !p.CopyVideo {
+		args = append(args, "-skip_loop_filter", "all")
+	}
+
 	args = append(args, "-i", p.RawURL)
 
 	// -ss ПОСЛЕ -i — это output-side seek, и так задумано: иначе разъезжаются
@@ -102,7 +108,7 @@ func BuildArgs(p Params) []string {
 		args = append(args, "-ss", jscompat.ToFixed(p.Start, 3))
 	}
 
-	args = append(args, "-map", "0:"+strconv.Itoa(p.VideoIndex))
+	args = append(args, "-map", "0:"+strconv.Itoa(p.Video.Index))
 	if p.Audio != nil {
 		args = append(args, "-map", "0:"+strconv.Itoa(p.Audio.Index))
 	} else {
@@ -116,7 +122,7 @@ func BuildArgs(p Params) []string {
 		args = append(args, "-map", "0:"+strconv.Itoa(p.Subtitle.Index))
 	}
 
-	args = append(args, videoArgs(p.CopyVideo)...)
+	args = append(args, videoArgs(p.CopyVideo, p.Video)...)
 	if p.Audio != nil {
 		args = append(args, audioArgs(p.CopyAudio)...)
 	}
@@ -175,11 +181,15 @@ func BuildArgs(p Params) []string {
 	return append(args, filepath.Join(p.Dir, PlaylistName))
 }
 
-func videoArgs(copy bool) []string {
+func videoArgs(copy bool, v *media.VideoInfo) []string {
 	if copy {
 		return []string{"-c:v", "copy"}
 	}
-	return []string{
+	var args []string
+	if filter := videoFilter(v); filter != "" {
+		args = append(args, "-vf", filter)
+	}
+	args = append(args,
 		"-c:v", "libx264",
 		"-preset", "veryfast",
 		"-crf", "20",
@@ -189,8 +199,66 @@ func videoArgs(copy bool) []string {
 		"-sc_threshold", "0",
 		// Ключевой кадр раз в 4 с — ровно под -hls_time 4, чтобы сегменты
 		// резались одинаковыми. В режиме copy этого рычага нет.
-		"-force_key_frames", "expr:gte(t,n_forced*" + strconv.Itoa(SegmentSeconds) + ")",
+		"-force_key_frames", "expr:gte(t,n_forced*"+strconv.Itoa(SegmentSeconds)+")",
+	)
+	if v.HDR() {
+		// ffmpeg 5.1 берёт метки цвета у декодера, а не у кадра: без них сведённый
+		// в SDR поток назывался бы PQ/BT.2020.
+		args = append(args, "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709")
 	}
+	return args
+}
+
+const (
+	frameMaxWidth  = 1920
+	frameMaxHeight = 1088
+)
+
+// HDR уменьшается сильнее: на проде тонмаппинг в 1080p не успевает за реальным
+// временем, а в 720p успевает.
+func frameBox(v *media.VideoInfo) (int, int) {
+	if v.HDR() {
+		return 1280, 720
+	}
+	return 1920, 1080
+}
+
+func outputFrame(v *media.VideoInfo) (w, h int, scaled bool) {
+	if v.Width <= 0 || v.Height <= 0 || (v.Width <= frameMaxWidth && v.Height <= frameMaxHeight) {
+		return v.Width, v.Height, false
+	}
+	boxW, boxH := frameBox(v)
+	w, h = boxW, roundDiv(v.Height*boxW, v.Width)
+	if h > boxH {
+		w, h = roundDiv(v.Width*boxH, v.Height), boxH
+	}
+	return w &^ 1, h &^ 1, true
+}
+
+func roundDiv(a, b int) int { return (a + b/2) / b }
+
+// zscale, а не scale: swscale в ffmpeg 5.1 однопоточный и на 4K съедал четверть скорости.
+func videoFilter(v *media.VideoInfo) string {
+	w, h, scaled := outputFrame(v)
+	var size string
+	if scaled {
+		size = "w=" + strconv.Itoa(w) + ":h=" + strconv.Itoa(h) + ":f=bilinear"
+	}
+	switch {
+	case v.HDR():
+		linear := "tin=" + v.ColorTransfer + ":min=bt2020nc:pin=bt2020:rin=tv:t=linear:npl=100"
+		if size != "" {
+			linear = size + ":" + linear
+		}
+		// Уменьшение — в первом же проходе, до тонмаппинга: тот считает во float,
+		// и каждый лишний пиксель стоит дорого.
+		return "zscale=" + linear +
+			",format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=mobius:desat=0" +
+			",zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+	case scaled:
+		return "zscale=" + size + ",format=yuv420p"
+	}
+	return ""
 }
 
 func audioArgs(copy bool) []string {

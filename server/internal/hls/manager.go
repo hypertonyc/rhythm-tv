@@ -122,14 +122,14 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 	copyAudio := audio != nil && media.CanCopyAudio(audio, seek, m.AllowCopy)
 
 	args := BuildArgs(Params{
-		RawURL:     m.RawURL(opts.Index),
-		Dir:        dir,
-		VideoIndex: meta.Video.Index,
-		Audio:      audio,
-		Subtitle:   subtitle,
-		Start:      seek.Start,
-		CopyVideo:  copyVideo,
-		CopyAudio:  copyAudio,
+		RawURL:    m.RawURL(opts.Index),
+		Dir:       dir,
+		Video:     meta.Video,
+		Audio:     audio,
+		Subtitle:  subtitle,
+		Start:     seek.Start,
+		CopyVideo: copyVideo,
+		CopyAudio: copyAudio,
 	})
 
 	videoMode := "transcode"

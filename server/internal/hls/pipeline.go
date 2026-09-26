@@ -36,9 +36,16 @@ func describePipeline(v *media.VideoInfo, a *media.AudioTrack, copyVideo, copyAu
 	if copyVideo {
 		p.Video.To = p.Video.From
 	} else {
-		// Ровно то, что стоит в videoArgs. Разрешение не меняется: фильтра
-		// масштабирования у нас нет вовсе.
-		p.Video.To = joinParts("h264", "High@4.0", "yuv420p", resolution(v), "libx264 crf 20")
+		// Ровно то, что стоит в videoArgs; размер кадра — тот же, что уходит в -vf.
+		var size, toneMap string
+		if v != nil {
+			w, h, _ := outputFrame(v)
+			size = frameSize(w, h)
+			if v.HDR() {
+				toneMap = "tonemap → SDR"
+			}
+		}
+		p.Video.To = joinParts("h264", "High@4.0", "yuv420p", size, toneMap, "libx264 crf 20")
 	}
 
 	if a == nil {
@@ -66,7 +73,18 @@ func describeVideo(v *media.VideoInfo) string {
 	if v == nil {
 		return "no video"
 	}
-	return joinParts(v.Codec, videoProfile(v), v.PixFmt, resolution(v))
+	return joinParts(v.Codec, videoProfile(v), v.PixFmt, resolution(v), dynamicRange(v))
+}
+
+func dynamicRange(v *media.VideoInfo) string {
+	switch {
+	case !v.HDR():
+		return ""
+	case v.ColorTransfer == "arib-std-b67":
+		return "HDR HLG"
+	default:
+		return "HDR PQ"
+	}
 }
 
 func describeAudio(a *media.AudioTrack) string {
@@ -90,10 +108,17 @@ func videoProfile(v *media.VideoInfo) string {
 }
 
 func resolution(v *media.VideoInfo) string {
-	if v == nil || v.Width <= 0 || v.Height <= 0 {
+	if v == nil {
 		return ""
 	}
-	return strconv.Itoa(v.Width) + "x" + strconv.Itoa(v.Height)
+	return frameSize(v.Width, v.Height)
+}
+
+func frameSize(w, h int) string {
+	if w <= 0 || h <= 0 {
+		return ""
+	}
+	return strconv.Itoa(w) + "x" + strconv.Itoa(h)
 }
 
 // channels: цифра сама по себе человеку ничего не говорит, а «5.1» говорит.
