@@ -81,6 +81,8 @@
     var subtitleSizePos = 2;
 
     var menuRows = ['season', 'episode', 'audio', 'sub', 'subsize', 'autonext', 'play', 'server'];
+    /* Индекс серии, которую попросили начать с начала; для остальных Play продолжает. */
+    var startOverFor = null;
 
     function el(id) { return document.getElementById(id); }
 
@@ -786,7 +788,9 @@
         el('subtitleSizeValue').innerHTML = '‹  ' + subtitleSizes[subtitleSizePos].label + ' (' + subtitleSizes[subtitleSizePos].px + ' px)  ›';
         el('autonextValue').innerHTML = '‹  ' + (autoNext ? 'On' : 'Off') + '  ›';
         var saved = savedPosition(ep.index);
-        el('playValue').innerHTML = saved > 10 ? ('Resume from ' + fmt(saved) + '  ▶') : 'Start  ▶';
+        if (saved <= 10) el('playValue').innerHTML = 'Start  ▶';
+        else if (startOverFor === ep.index) el('playValue').innerHTML = '‹  From the start  ›  ▶';
+        else el('playValue').innerHTML = '‹  Resume from ' + fmt(saved) + '  ›  ▶';
         el('serverValue').innerHTML = serverBase;
         refreshMenuFocus();
     }
@@ -1332,8 +1336,17 @@
         storeSet('rtv.audio', selectedAudioCode());
         storeSet('rtv.sub', selectedSubCode());
         var saved = savedPosition(ep.index);
-        if (saved > 10 && (!meta.duration || saved < meta.duration - 30)) startPlayback(saved);
+        var fromStart = startOverFor === ep.index;
+        startOverFor = null;
+        if (!fromStart && saved > 10 && (!meta.duration || saved < meta.duration - 30)) startPlayback(saved);
         else startPlayback(0);
+    }
+
+    function toggleStartOver() {
+        var ep = currentEpisode();
+        if (!ep || savedPosition(ep.index) <= 10) return;
+        startOverFor = startOverFor === ep.index ? null : ep.index;
+        refreshMenu();
     }
 
     /* Перемотки на этой прошивке нет: avplay.seekTo ненадёжен, поэтому каждое
@@ -1585,6 +1598,7 @@
         else if (row === 'sub') changeSub(delta);
         else if (row === 'subsize') changeSubtitleSize(delta);
         else if (row === 'autonext') toggleAutoNext();
+        else if (row === 'play') toggleStartOver();
     }
 
     function menuEnter() {
