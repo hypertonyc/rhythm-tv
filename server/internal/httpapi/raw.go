@@ -35,6 +35,8 @@ func rawContentType(name string) string {
 		return "video/x-matroska"
 	case ".webm":
 		return "video/webm"
+	case ".avi":
+		return "video/x-msvideo"
 	default:
 		return "application/octet-stream"
 	}

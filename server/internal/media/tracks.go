@@ -28,11 +28,12 @@ var languages = []language{
 	{"tha", "Thai", regexp.MustCompile(`\b(tha|th|thai)\b`), regexp.MustCompile(`тай`)},
 }
 
-// videoName — фильтр списка серий, /\.(mp4|m4v|mkv|webm)$/i из server.mjs:71.
+// videoName — фильтр списка серий, /\.(mp4|m4v|mkv|webm)$/i из server.mjs:71,
+// плюс avi: в нём лежат русские WEB-DLRip, а эталон отдавал такой торрент без серий.
 //
 // Классы расписаны по буквам намеренно: (?i) в Go делает юникодный fold,
 // и (?i)mkv совпал бы с «m<KELVIN SIGN>v», а JS-овый /i без /u — нет.
-var videoName = regexp.MustCompile(`\.([Mm][Pp]4|[Mm]4[Vv]|[Mm][Kk][Vv]|[Ww][Ee][Bb][Mm])$`)
+var videoName = regexp.MustCompile(`\.([Mm][Pp]4|[Mm]4[Vv]|[Mm][Kk][Vv]|[Ww][Ee][Bb][Mm]|[Aa][Vv][Ii])$`)
 
 // IsVideoName повторяет фильтр videoFiles(): в меню попадают только эти расширения.
 func IsVideoName(name string) bool { return videoName.MatchString(name) }

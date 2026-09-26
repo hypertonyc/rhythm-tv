@@ -69,6 +69,7 @@ func TestRawContentType(t *testing.T) {
 		"a.MKV":              "video/x-matroska",
 		"a.m4v":              "video/x-m4v",
 		"a.webm":             "video/webm",
+		"a.avi":              "video/x-msvideo",
 		"notes.txt":          "application/octet-stream",
 		"noext":              "application/octet-stream",
 	}

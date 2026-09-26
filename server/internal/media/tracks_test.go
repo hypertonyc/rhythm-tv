@@ -192,6 +192,7 @@ func TestIsVideoName(t *testing.T) {
 	yes := []string{
 		"S01E01 - Pilot.mkv", "a.mp4", "a.MP4", "a.m4v", "a.M4V",
 		"a.webm", "a.WebM", "a.MKV", "a.mKv",
+		"Stuart.Fails.to.Save.the.Universe.S01.E01.Rus.RG.Anonymous.avi", "a.AVI",
 	}
 	for _, n := range yes {
 		if !IsVideoName(n) {
@@ -199,7 +200,7 @@ func TestIsVideoName(t *testing.T) {
 		}
 	}
 	no := []string{
-		"notes.txt", "a.mkv.txt", "a.avi", "a.mp3", "mkv", "",
+		"notes.txt", "a.mkv.txt", "a.avi.srt", "a.mp3", "mkv", "",
 		// (?i) в Go делает юникодный fold: без явных ASCII-классов
 		// KELVIN SIGN (U+212A) совпал бы с 'k'.
 		"a.m\u212av",
