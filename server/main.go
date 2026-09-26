@@ -152,6 +152,7 @@ func main() {
 	manager := &hls.Manager{
 		AllowCopy: allowCopy,
 		RawURL:    rawURL,
+		RatesPath: filepath.Join(libDir, ".tms-rates"),
 		Keyframe: func(index, videoIndex int, start float64) (float64, bool) {
 			return keyframes.Before(ctx, index, videoIndex, start)
 		},

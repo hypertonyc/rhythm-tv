@@ -13,7 +13,7 @@ func transcodingSession(duration, start float64) *Session {
 func TestStartupSegmentsCopyIsAlwaysTwo(t *testing.T) {
 	s := transcodingSession(1500, 0)
 	s.videoMode = "copy"
-	if got := startupSegmentsFor(s, 1000); got != StartupSegments {
+	if got := startupSegmentsFor(s, 1000, 0); got != StartupSegments {
 		t.Errorf("copy ждёт %d сегментов, ожидалось %d", got, StartupSegments)
 	}
 }
@@ -22,7 +22,7 @@ func TestStartupSegmentsCopyIsAlwaysTwo(t *testing.T) {
 func TestStartupSegmentsAdoptedIsTwo(t *testing.T) {
 	s := transcodingSession(1500, 0)
 	s.progress = nil
-	if got := startupSegmentsFor(s, 1000); got != StartupSegments {
+	if got := startupSegmentsFor(s, 1000, 0); got != StartupSegments {
 		t.Errorf("подобранный сеанс ждёт %d сегментов", got)
 	}
 }
@@ -30,7 +30,7 @@ func TestStartupSegmentsAdoptedIsTwo(t *testing.T) {
 func TestStartupSegmentsWaitsForMeasurement(t *testing.T) {
 	s := transcodingSession(1500, 0)
 	s.segments, s.firstOutputAt, s.firstOutputSegs = 2, 1000, 1
-	if got := startupSegmentsFor(s, 5000); got != StartupSegments+1 {
+	if got := startupSegmentsFor(s, 5000, 0); got != StartupSegments+1 {
 		t.Errorf("без замера отпускаем на %d сегментах, ожидалось %d", got, StartupSegments+1)
 	}
 }
@@ -39,7 +39,7 @@ func TestStartupSegmentsFastTranscodeKeepsTwo(t *testing.T) {
 	s := transcodingSession(1500, 0)
 	// 4 интервала по 4 с за 8 с — вдвое быстрее реального времени.
 	s.segments, s.firstOutputAt, s.firstOutputSegs = 5, 1000, 1
-	if got := startupSegmentsFor(s, 9000); got != StartupSegments {
+	if got := startupSegmentsFor(s, 9000, 0); got != StartupSegments {
 		t.Errorf("быстрое перекодирование ждёт %d сегментов", got)
 	}
 }
@@ -54,7 +54,7 @@ func TestStartupSegmentsSlowTranscodeBuildsLead(t *testing.T) {
 		t.Fatalf("скорость %v %v, ожидалось 0.9", rate, ok)
 	}
 	// (1502−52)·(1 − 0.9/1.05) = 207.1 с → 52 сегмента.
-	if got := startupSegmentsFor(s, 41000); got != 52 {
+	if got := startupSegmentsFor(s, 41000, 0); got != 52 {
 		t.Errorf("запас %d сегментов, ожидалось 52", got)
 	}
 }
@@ -62,7 +62,7 @@ func TestStartupSegmentsSlowTranscodeBuildsLead(t *testing.T) {
 func TestStartupSegmentsLeadIsCapped(t *testing.T) {
 	s := transcodingSession(3000, 0)
 	s.segments, s.firstOutputAt, s.firstOutputSegs = 3, 1000, 1
-	if got := startupSegmentsFor(s, 17000); got != maxLeadSeconds/SegmentSeconds {
+	if got := startupSegmentsFor(s, 17000, 0); got != maxLeadSeconds/SegmentSeconds {
 		t.Errorf("запас %d сегментов, потолок %d", got, maxLeadSeconds/SegmentSeconds)
 	}
 }
@@ -88,5 +88,64 @@ func TestPollSegmentsRemembersFirstOutput(t *testing.T) {
 	pollSegments(s, 86000)
 	if s.firstOutputAt != 82000 || s.firstOutputSegs != 1 {
 		t.Errorf("первый сегмент: at=%d segs=%d, ожидалось 82000/1", s.firstOutputAt, s.firstOutputSegs)
+	}
+}
+
+// Начало серии быстрее середины: при обычных для формата 0.9× замер 1.1×
+// в первые секунды не должен отпускать телевизор на двух сегментах.
+func TestStartupSegmentsTakesTheSlowerOfMeasuredAndUsual(t *testing.T) {
+	s := transcodingSession(1502, 52)
+	s.segments, s.firstOutputAt, s.firstOutputSegs = 12, 1000, 1
+	if rate, _ := outputRate(s, 41000); rate != 1.1 {
+		t.Fatalf("замер %v, ожидалось 1.1", rate)
+	}
+	if got := startupSegmentsFor(s, 41000, 0.9); got != 52 {
+		t.Errorf("запас %d сегментов, ожидалось 52 — как при 0.9×", got)
+	}
+}
+
+// Обычная скорость известна до первого сегмента, и ждать замера тогда незачем.
+func TestStartupSegmentsUsesUsualBeforeMeasurement(t *testing.T) {
+	s := transcodingSession(1502, 52)
+	if got := startupSegmentsFor(s, 1000, 0.9); got != 52 {
+		t.Errorf("запас %d сегментов, ожидалось 52", got)
+	}
+}
+
+func finishedSession(produced, elapsedMs int) *Session {
+	s := transcodingSession(1502, 0)
+	s.pipeline = Pipeline{Video: PipelineTrack{From: "hevc 3840x2160 HDR PQ", To: "h264 1280x720"}}
+	s.firstOutputAt, s.firstOutputSegs = 1000, 1
+	s.segments = 1 + produced/SegmentSeconds
+	last := int64(1000 + elapsedMs)
+	s.lastOutputAt = &last
+	return s
+}
+
+func TestRememberRateSmoothsAndPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".tms-rates")
+	m := &Manager{RatesPath: path}
+
+	m.rememberRateLocked(finishedSession(400, 500000))
+	m.rememberRateLocked(finishedSession(400, 400000))
+	key := rateKey(finishedSession(400, 1))
+	if got := m.rates[key]; got != 0.9 {
+		t.Fatalf("обычная скорость %v, ожидалось (0.8+1.0)/2 = 0.9", got)
+	}
+
+	fresh := &Manager{RatesPath: path}
+	if got := fresh.usualRateLocked(finishedSession(400, 1)); got != 0.9 {
+		t.Errorf("после перезапуска обычная скорость %v, ожидалось 0.9", got)
+	}
+}
+
+func TestRememberRateSkipsShortAndCopiedSessions(t *testing.T) {
+	m := &Manager{}
+	m.rememberRateLocked(finishedSession(40, 40000))
+	copied := finishedSession(400, 20000)
+	copied.videoMode = "copy"
+	m.rememberRateLocked(copied)
+	if len(m.rates) != 0 {
+		t.Errorf("запомнено лишнее: %v", m.rates)
 	}
 }

@@ -58,9 +58,13 @@ type Manager struct {
 	Downloaded func() int64
 	// NowMilli подменяется в тестах; иначе time.Now().UnixMilli.
 	NowMilli func() int64
+	// RatesPath — где помнится обычная скорость перекодирования по форматам
+	// (lead.go); пусто — только в памяти процесса.
+	RatesPath string
 
 	mu       sync.Mutex
 	sessions map[string]*Session
+	rates    map[string]float64
 	// MULTI-TORRENT PIN: при мультиторренте это станет map по id торрента.
 	// sessions менять не придётся — id сеансов и так глобально уникальны.
 	active *Session
@@ -316,6 +320,7 @@ func (m *Manager) wait(s *Session, cmd *exec.Cmd) {
 
 	pollSegments(s, m.now())
 	s.advancePhase()
+	m.rememberRateLocked(s)
 	now := m.now()
 	s.lastOutputAt = &now
 
@@ -445,7 +450,8 @@ func (m *Manager) Progress(id string) (Progress, bool) {
 
 func (m *Manager) progressLocked(s *Session) Progress {
 	now := m.now()
-	need := startupSegmentsFor(s, now)
+	usual := m.usualRateLocked(s)
+	need := startupSegmentsFor(s, now, usual)
 	p := Progress{
 		ID:              s.id,
 		Name:            s.name,
@@ -484,7 +490,7 @@ func (m *Manager) progressLocked(s *Session) Progress {
 	}
 	// speed у ffmpeg — среднее с запуска процесса, вместе с декодированием
 	// до точки перемотки; замер по сегментам этого не видит и потому точнее.
-	if rate, ok := outputRate(s, now); ok {
+	if rate, ok := startupRate(s, now, usual); ok && s.firstOutputAt != 0 {
 		eta := int64(float64((need-s.segments)*SegmentSeconds*1000) / rate)
 		p.EtaMs = &eta
 	} else if p.EncodedMs != nil && p.Speed != nil && *p.Speed > 0 {

@@ -189,9 +189,15 @@ func videoArgs(copy bool, v *media.VideoInfo) []string {
 	if filter := videoFilter(v); filter != "" {
 		args = append(args, "-vf", filter)
 	}
+	preset := "veryfast"
+	if _, _, scaled := outputFrame(v); scaled {
+		// Уменьшаемый 4K упирается в процессор: superfast на проде быстрее
+		// на ~7% и платит за это битрейтом, а не качеством — crf тот же.
+		preset = "superfast"
+	}
 	args = append(args,
 		"-c:v", "libx264",
-		"-preset", "veryfast",
+		"-preset", preset,
 		"-crf", "20",
 		"-pix_fmt", "yuv420p",
 		"-profile:v", "high",

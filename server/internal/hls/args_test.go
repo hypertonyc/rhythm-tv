@@ -352,3 +352,14 @@ func TestCopiedVideoGetsNoFilter(t *testing.T) {
 		}
 	}
 }
+
+func TestScaledSourceUsesSuperfast(t *testing.T) {
+	scaled := BuildArgs(Params{RawURL: "u", Dir: "/tmp/d", Video: &media.VideoInfo{Width: 3840, Height: 2160}})
+	if at := indexOf(scaled, "-preset"); scaled[at+1] != "superfast" {
+		t.Errorf("4K: -preset %s", scaled[at+1])
+	}
+	native := BuildArgs(Params{RawURL: "u", Dir: "/tmp/d", Video: &media.VideoInfo{Width: 1920, Height: 1080}})
+	if at := indexOf(native, "-preset"); native[at+1] != "veryfast" {
+		t.Errorf("1080p: -preset %s — golden-сценарии ждут veryfast", native[at+1])
+	}
+}
