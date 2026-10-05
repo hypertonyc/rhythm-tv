@@ -40,6 +40,8 @@
      * не пошла. По этой отметке сторожится молчаливый простой, см. watchForStall. */
     var lastPlayTimeAt = 0;
     var stallLimitMs = 30000;
+    var prepareLimitMs = 30000;
+    var playerAttempt = 0;
     /* Сколько до конца серии считается «доиграли» и сколько после этого ждём
      * onstreamcompleted, прежде чем закончить серию самим. См. endOfEpisodeStuck. */
     var endZoneSec = 3;
@@ -66,6 +68,7 @@
     /* Ответ /api/pipeline: настоящий ход перекодирования от самого ffmpeg. */
     var waitProgress = null;
     var waitSwarm = '';
+    var waitOpenAttempts = 0;
     var waitTicker = null;
     var subtitlePlaylistUrl = '';
     var subtitlePollTimer = null;
@@ -363,11 +366,13 @@
     }
 
     function pollSubtitlePlaylist() {
-        if (!subtitlePlaylistUrl || mode !== 'player') return;
-        xhrText(subtitlePlaylistUrl + (subtitlePlaylistUrl.indexOf('?') >= 0 ? '&' : '?') + '_=' + new Date().getTime(), function (err, text) {
+        var url = subtitlePlaylistUrl;
+        if (!url || mode !== 'player') return;
+        xhrText(url + (url.indexOf('?') >= 0 ? '&' : '?') + '_=' + new Date().getTime(), function (err, text) {
+            if (url !== subtitlePlaylistUrl) return;
             if (!err) {
                 var lines = String(text || '').replace(/\r/g, '').split('\n');
-                var base = subtitleBaseUrl(subtitlePlaylistUrl);
+                var base = subtitleBaseUrl(url);
                 var i, line;
                 for (i = 0; i < lines.length; i++) {
                     line = lines[i].replace(/^\s+|\s+$/g, '');
@@ -378,7 +383,7 @@
                     }
                 }
             }
-            if (subtitlePlaylistUrl && mode === 'player') {
+            if (mode === 'player') {
                 subtitlePollTimer = setTimeout(pollSubtitlePlaylist, 1200);
             }
         }, 5000);
@@ -979,6 +984,8 @@
      * (подождать, пока серия докачается, вместо новой перемотки). */
     function waitPhaseText() {
         var s = waitSnapshot;
+        if (waitOpenAttempts > 1) return 'The player did not start · retry ' + (waitOpenAttempts - 1);
+        if (waitOpenAttempts === 1) return 'Opening the player…';
         if (waitHasProgress()) {
             var mode = waitProgress.pipeline && waitProgress.pipeline.video
                 ? waitProgress.pipeline.video.mode : '';
@@ -1072,6 +1079,7 @@
         waitSnapshot = null;
         waitProgress = null;
         waitSwarm = '';
+        waitOpenAttempts = 0;
         el('waitTitle').innerHTML = escapeHtml(kind === 'seek'
             ? 'Jumping to ' + fmt(targetSeconds)
             : (meta ? meta.name : 'Starting'));
@@ -1110,12 +1118,14 @@
         }
     }
 
-    function playerListener() {
+    function playerListener(generation) {
+        function ours() { return generation === startGeneration; }
         return {
-            onbufferingstart: function () { showHud('Buffering…'); },
-            onbufferingprogress: function (percent) { showHud('Buffering ' + percent + '%'); },
-            onbufferingcomplete: function () { showHud('Playing'); },
+            onbufferingstart: function () { if (ours()) showHud('Buffering…'); },
+            onbufferingprogress: function (percent) { if (ours()) showHud('Buffering ' + percent + '%'); },
+            onbufferingcomplete: function () { if (ours()) showHud('Playing'); },
             oncurrentplaytime: function (currentTime) {
+                if (!ours()) return;
                 var incoming = Number(currentTime) || 0;
                 var now = new Date().getTime();
                 var gap = lastPlaytimeCallAt ? now - lastPlaytimeCallAt : 0;
@@ -1161,10 +1171,10 @@
                     apiIgnore('/api/probe/' + meta.next);
                 }
             },
-            onstreamcompleted: function () { streamCompleted(); },
+            onstreamcompleted: function () { if (ours()) streamCompleted(); },
             onevent: function () {},
             onerror: function (eventType) {
-                showHud('AVPlay error: ' + eventType);
+                if (ours()) showHud('AVPlay error: ' + eventType);
             },
             onsubtitlechange: function () {}
         };
@@ -1186,10 +1196,11 @@
 
     /* prepareAsync зовёт свой колбэк асинхронно, и за это время перемотка могла
      * начать новый сеанс — она работает и во время подготовки. Тогда наш AVPlay
-     * уже закрыт из commitSeek, play() бросит, и без проверки номера попытки
+     * уже закрыт из startPlayback, play() бросит, и без проверки номера попытки
      * прежний колбэк снял бы restarting и написал бы «Play failed» поверх
      * живого нового сеанса. */
     function openPlaylist(generation, url) {
+        var attempt = ++playerAttempt;
         closeAvplay();
         lastPlayerTime = 0;
         maxPlayerTime = 0;
@@ -1202,15 +1213,24 @@
         mode = 'player';
         el('hudTitle').innerHTML = meta ? meta.name : 'Playing';
         updateHudClock();
+        waitOpenAttempts++;
+        renderWait();
         showHud('Opening AVPlay…');
+
+        /* prepareAsync умеет не позвать ни один из колбэков: 05.10.2026 после
+         * обрыва сети карточка ожидания висела бесконечно. */
+        setTimeout(function () {
+            if (generation !== startGeneration || attempt !== playerAttempt || !restarting) return;
+            openPlaylist(generation, url);
+        }, prepareLimitMs);
 
         try {
             webapis.avplay.open(url);
             webapis.avplay.setDisplayRect(0, 0, 1920, 1080);
-            webapis.avplay.setListener(playerListener());
+            webapis.avplay.setListener(playerListener(generation));
             try { webapis.avplay.setTimeoutForBuffering(30); } catch (e0) {}
             webapis.avplay.prepareAsync(function () {
-                if (generation !== startGeneration) return;
+                if (generation !== startGeneration || attempt !== playerAttempt) return;
                 try {
                     webapis.avplay.play();
                     restarting = false;
@@ -1222,7 +1242,7 @@
                     showHud('Play failed: ' + e1.message);
                 }
             }, function (err) {
-                if (generation !== startGeneration) return;
+                if (generation !== startGeneration || attempt !== playerAttempt) return;
                 restarting = false;
                 endWait(false);
                 showHud('Prepare failed: ' + (err && err.message ? err.message : String(err)));
@@ -1239,6 +1259,12 @@
         if (mode !== 'player' && !restarting) return;
         api('/api/hls-status/' + encodeURIComponent(sessionId) + '?_=' + new Date().getTime(), function (err, s) {
             if (generation !== startGeneration) return;
+            /* На потерях до телевизора пропадает отдельный опрос, а не сеанс; бросив
+             * старт из-за него, мы оставляли чёрный экран до нажатия Back. */
+            if (err && (!err.status || err.status >= 500)) {
+                setTimeout(function () { waitForHls(generation, sessionId, playlist); }, 1400);
+                return;
+            }
             if (err) {
                 restarting = false;
                 endWait(false);
@@ -1281,6 +1307,9 @@
         }
         cancelPendingSeek();
         var generation = ++startGeneration;
+        /* Оставленный открытым застрявший AVPlay продолжал звать oncurrentplaytime:
+         * его часы ложились на новый startOffset и снова взводили watchForStall. */
+        closeAvplay();
         seconds = Math.max(0, Math.min(Number(seconds) || 0, Math.max(0, durationSeconds() - 1)));
         startOffset = seconds;
         lastPlayerTime = 0;
@@ -1389,7 +1418,6 @@
             return;
         }
         savePosition(meta.index, target);
-        closeAvplay();
         startPlayback(target); /* обнулит seekPendingTarget сам */
     }
 
