@@ -123,7 +123,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Кэш обязательно со scope: без него ветки PR и main вытесняют друг
-          # друга из 10 ГБ кэша, и слой apt-get install ffmpeg пересобирается
+          # друга из 10 ГБ кэша, и слой apk add ffmpeg пересобирается
           # каждый раз — а он самый дорогой.
           cache-from: |
             type=gha,scope=server-${{ github.ref_name }}

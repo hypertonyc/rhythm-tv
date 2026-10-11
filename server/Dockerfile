@@ -15,14 +15,12 @@ COPY . .
 # ценой читаемых трасс в панике (их всё равно смотрят по логам, а не в проде).
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/server .
 
-# trixie ради ffmpeg 7.1: его многопоточный конвейер перекодирует 4K HDR на проде
-# на ~1.03× реального времени против ~0.88× у 5.1 из bookworm.
-FROM debian:trixie-slim
+# ffmpeg не ниже 8.0: в 7.1 (Debian trixie) сеанс copy изредка начинается сегментами без звука,
+# и AVPlay на них не стартует. Alpine 3.24 даёт 8.1, 4K HDR на проде — с той же скоростью, что 7.1.
+FROM alpine:3.24
 # ffmpeg с ffprobe — обязательная часть рантайма, сервер зовёт их процессами.
 # ca-certificates нужны трекерам по https.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ffmpeg ca-certificates
 
 COPY --from=build /out/server /usr/local/bin/server
 
