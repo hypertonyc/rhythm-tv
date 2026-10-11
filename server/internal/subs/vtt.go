@@ -83,6 +83,15 @@ func renderPlaylist(duration float64) string {
 	return b.String()
 }
 
+// Нужна пробе hls.ProbeSubtitleSeek: по первой реплике видно, сдвинул ли ffmpeg субтитры на -ss.
+func FirstCueStart(raw []byte) (float64, bool) {
+	cues := parseCues(decode(raw))
+	if len(cues) == 0 {
+		return 0, false
+	}
+	return cues[0].start, true
+}
+
 // renderVTT печатает реплики, сдвинутые на start.
 func renderVTT(cues []cue, start float64) string {
 	var b strings.Builder

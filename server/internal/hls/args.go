@@ -40,6 +40,9 @@ type Params struct {
 	Start     float64
 	CopyVideo bool
 	CopyAudio bool
+
+	// ffmpeg не сдвигает встроенные субтитры на output-side -ss (ProbeSubtitleSeek) — сдвигаем фильтром.
+	ShiftSubtitles bool
 }
 
 // BuildArgs собирает argv для ffmpeg.
@@ -129,6 +132,11 @@ func BuildArgs(p Params) []string {
 
 	if p.Subtitle != nil {
 		args = append(args, "-c:s", "webvtt")
+		// До муксера, а не на отдаче: HLS раскладывает реплики по файлам по их времени, и при
+		// перекодировании реплика с временем серии появлялась бы на start секунд позже, чем нужна.
+		if p.ShiftSubtitles && p.Start > seekThreshold {
+			args = append(args, "-bsf:s", "setts=ts=TS-"+jscompat.ToFixed(p.Start, 3)+"/TB")
+		}
 	} else {
 		args = append(args, "-sn")
 	}

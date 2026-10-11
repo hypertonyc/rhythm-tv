@@ -62,6 +62,9 @@ type Manager struct {
 	// (lead.go); пусто — только в памяти процесса.
 	RatesPath string
 
+	// Ставится ProbeSubtitleSeek до начала обслуживания и дальше не меняется.
+	shiftSubtitles bool
+
 	mu       sync.Mutex
 	sessions map[string]*Session
 	rates    map[string]float64
@@ -135,6 +138,8 @@ func (m *Manager) Start(opts StartOptions) (Snapshot, error) {
 		Start:     seek.Start,
 		CopyVideo: copyVideo,
 		CopyAudio: copyAudio,
+
+		ShiftSubtitles: m.shiftSubtitles,
 	})
 
 	videoMode := "transcode"

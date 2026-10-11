@@ -197,3 +197,12 @@ func TestWriteSessionUnknownDuration(t *testing.T) {
 		t.Errorf("плейлист с неизвестной длительностью:\n%s", playlist)
 	}
 }
+
+func TestFirstCueStart(t *testing.T) {
+	if got, ok := FirstCueStart([]byte("WEBVTT\n\n00:03.000 --> 00:04.000\nx\n")); !ok || got != 3 {
+		t.Errorf("первая реплика %v, %v", got, ok)
+	}
+	if _, ok := FirstCueStart([]byte("WEBVTT\n")); ok {
+		t.Error("в пустом WebVTT нашлась реплика")
+	}
+}
