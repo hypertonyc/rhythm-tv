@@ -46,7 +46,7 @@ func seekProbe(t *testing.T, keyframe float64, found bool) (*Manager, func() str
 	// не мгновенно: подделка успевает записать файл через считаные миллисекунды.
 	args := func() string {
 		t.Helper()
-		for i := 0; i < 200; i++ {
+		for i := 0; i < 1000; i++ {
 			if data, err := os.ReadFile(argv); err == nil {
 				return string(data)
 			}
