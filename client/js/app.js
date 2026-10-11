@@ -69,6 +69,7 @@
     var waitProgress = null;
     var waitSwarm = '';
     var waitOpenAttempts = 0;
+    var sessionRestarted = false;
     var waitTicker = null;
     var subtitlePlaylistUrl = '';
     var subtitlePollTimer = null;
@@ -1221,6 +1222,13 @@
          * обрыва сети карточка ожидания висела бесконечно. */
         setTimeout(function () {
             if (generation !== startGeneration || attempt !== playerAttempt || !restarting) return;
+            /* Испорченные сегменты (ffmpeg 7.1, 10.10.2026) лечит новый сеанс, а не переоткрытие. Один раз:
+             * не помог и он — дело в сети, а перезапуск обнуляет ожидание перекодирования. */
+            if (waitOpenAttempts >= 2 && !sessionRestarted) {
+                sessionRestarted = true;
+                startPlayback(startOffset);
+                return;
+            }
             openPlaylist(generation, url);
         }, prepareLimitMs);
 
@@ -1234,6 +1242,7 @@
                 try {
                     webapis.avplay.play();
                     restarting = false;
+                    sessionRestarted = false;
                     endWait(true);
                     showHud('Playing');
                 } catch (e1) {
@@ -1450,6 +1459,7 @@
          * уже после того, как мы его очистили. */
         startGeneration++;
         restarting = false;
+        sessionRestarted = false;
         currentSessionId = '';
         lostSessionPolls = 0;
         closeAvplay();
