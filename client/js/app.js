@@ -47,6 +47,13 @@
     var lastPlayTimeAt = 0;
     var stallLimitMs = 30000;
     var prepareLimitMs = 30000;
+    var prepareRecheckMs = 10000;
+    var prepareGiveUpMs = 120000;
+    /* Дольше этого между запросами сегментов — плеер встал, а не тянет по медленной сети:
+     * 23.10 и 28.10.2026 самый долгий сегмент шёл 48 с. */
+    var deliveryStallMs = 60000;
+    var stallCheckEveryMs = 6000;
+    var stallCheckAt = 0;
     var playerAttempt = 0;
     /* Сколько до конца серии считается «доиграли» и сколько после этого ждём
      * onstreamcompleted, прежде чем закончить серию самим. См. endOfEpisodeStuck. */
@@ -1353,17 +1360,32 @@
 
         /* prepareAsync умеет не позвать ни один из колбэков: 05.10.2026 после
          * обрыва сети карточка ожидания висела бесконечно. */
-        setTimeout(function () {
-            if (generation !== startGeneration || attempt !== playerAttempt || !restarting) return;
-            /* Испорченные сегменты (ffmpeg 7.1, 10.10.2026) лечит новый сеанс, а не переоткрытие. Один раз:
-             * не помог и он — дело в сети, а перезапуск обнуляет ожидание перекодирования. */
-            if (waitOpenAttempts >= 2 && !sessionRestarted) {
-                sessionRestarted = true;
-                startPlayback(startOffset);
-                return;
-            }
-            openPlaylist(generation, url);
-        }, prepareLimitMs);
+        var openedAt = new Date().getTime();
+        function stillPreparing() {
+            return generation === startGeneration && attempt === playerAttempt && restarting;
+        }
+        function watchPrepare(delay) {
+            setTimeout(function () {
+                if (!stillPreparing()) return;
+                checkDelivery(currentSessionId, function (delivery) {
+                    if (!stillPreparing()) return;
+                    /* 28.10.2026 переоткрытие оборвало наполовину скачанный первый сегмент. */
+                    if (delivery !== 'stalled' && new Date().getTime() - openedAt < prepareGiveUpMs) {
+                        watchPrepare(prepareRecheckMs);
+                        return;
+                    }
+                    /* Испорченные сегменты (ffmpeg 7.1, 10.10.2026) лечит новый сеанс, а не переоткрытие. Один раз:
+                     * не помог и он — дело в сети, а перезапуск обнуляет ожидание перекодирования. */
+                    if (waitOpenAttempts >= 2 && !sessionRestarted) {
+                        sessionRestarted = true;
+                        startPlayback(startOffset);
+                        return;
+                    }
+                    openPlaylist(generation, url);
+                });
+            }, delay);
+        }
+        watchPrepare(prepareLimitMs);
 
         try {
             webapis.avplay.open(url);
@@ -1748,10 +1770,43 @@
         // На паузе время стоять и должно.
         if (state === 'PAUSED') return;
 
-        var resumeAt = absoluteTime();
-        lastPlayTimeAt = 0;
-        showHud('Playback stalled, restarting…');
-        startPlayback(resumeAt);
+        var now = new Date().getTime();
+        if (now - stallCheckAt < stallCheckEveryMs) return;
+        stallCheckAt = now;
+        var generation = startGeneration;
+        checkDelivery(currentSessionId, function (delivery) {
+            if (generation !== startGeneration || mode !== 'player' || restarting || !lastPlayTimeAt) return;
+            if (seekPendingTarget !== null || new Date().getTime() - lastPlayTimeAt < stallLimitMs) return;
+            if (delivery !== 'stalled') {
+                showHud(delivery === 'flowing' ? 'Slow network, waiting for video…' : 'Server unreachable, waiting…');
+                return;
+            }
+            var resumeAt = absoluteTime();
+            lastPlayTimeAt = 0;
+            showHud('Playback stalled, restarting…');
+            startPlayback(resumeAt);
+        });
+    }
+
+    /* 'flowing' — плеер ещё просит сегменты, то есть тянет по медленной сети, и перезапуск
+     * только оборвал бы закачку; 'unknown' — сервер не ответил, перезапуск тоже не поможет. */
+    function checkDelivery(sessionId, callback) {
+        if (!sessionId) {
+            callback('stalled');
+            return;
+        }
+        api('/api/pipeline/' + encodeURIComponent(sessionId) + '?_=' + new Date().getTime(), function (err, p) {
+            if (err) {
+                /* 404 — сервер жив и сеанса не знает (или он старее этой ручки): ведём себя как раньше. */
+                callback(err.status && err.status < 500 ? 'stalled' : 'unknown');
+                return;
+            }
+            if (!p || typeof p.sinceSegmentRequestMs !== 'number') {
+                callback('stalled');
+                return;
+            }
+            callback(p.sinceSegmentRequestMs < deliveryStallMs ? 'flowing' : 'stalled');
+        }, 5000);
     }
 
     function maybeCheckLibrary() {

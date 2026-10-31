@@ -129,6 +129,13 @@ type Server struct {
 	lookingSession string
 	lookingSince   time.Time
 
+	// Последний запрос сегмента плеером: по нему телевизор отличает медленную
+	// сеть от вставшего плеера (pipeline.go). Слот один по той же причине.
+	deliveryMu      sync.Mutex
+	deliverySession string
+	deliveryCount   int
+	deliveryAt      time.Time
+
 	// now — часы окна входа, в тестах подменяются: предохранитель отмеряет
 	// секунды от первого запроса плейлиста, и ждать их по-настоящему незачем.
 	now func() time.Time

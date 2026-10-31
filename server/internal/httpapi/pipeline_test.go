@@ -3,6 +3,7 @@ package httpapi
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/avdav/torrent-media/server/internal/hls"
 )
@@ -57,5 +58,52 @@ func TestPipelineStaysOutOfStatus(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Errorf("%q просочился в /api/status:\n%s", forbidden, body)
 		}
+	}
+}
+
+// TestPipelineReportsSegmentRequests — по возрасту последнего запроса сегмента
+// телевизор отличает медленную сеть от вставшего плеера, прежде чем перезапускать.
+func TestPipelineReportsSegmentRequests(t *testing.T) {
+	s := newSessionServerActive(t, map[string]string{"seg00000.ts": "x", "seg00001.ts": "y"}, nil)
+	s.deps.HLS.(*fakeSessions).progress = &hls.Progress{ID: "abc"}
+	advance := freezeClock(s)
+
+	if body := do(s, "GET", "/api/pipeline/abc", nil).Body.String(); !strings.Contains(body, `"segmentRequests":0,"sinceSegmentRequestMs":null`) {
+		t.Fatalf("до первого сегмента возраст обязан быть null:\n%s", body)
+	}
+
+	do(s, "GET", "/hls/abc/seg00000.ts", nil)
+	advance(20 * time.Second)
+	do(s, "GET", "/hls/abc/seg00001.ts", nil)
+	advance(7 * time.Second)
+
+	body := do(s, "GET", "/api/pipeline/abc", nil).Body.String()
+	if !strings.Contains(body, `"segmentRequests":2,"sinceSegmentRequestMs":7000`) {
+		t.Fatalf("ждали два запроса и 7 с с последнего:\n%s", body)
+	}
+}
+
+// TestPipelineSegmentRequestsBelongToTheirSession — запросы прежнего сеанса
+// не должны выдавать новый за живой: после перемотки это уже другой плеер.
+func TestPipelineSegmentRequestsBelongToTheirSession(t *testing.T) {
+	s := newSessionServerActive(t, map[string]string{"seg00000.ts": "x"}, nil)
+	freezeClock(s)
+	do(s, "GET", "/hls/abc/seg00000.ts", nil)
+
+	s.deps.HLS.(*fakeSessions).progress = &hls.Progress{ID: "xyz"}
+	if body := do(s, "GET", "/api/pipeline/xyz", nil).Body.String(); !strings.Contains(body, `"segmentRequests":0,"sinceSegmentRequestMs":null`) {
+		t.Fatalf("чужие запросы попали в сеанс xyz:\n%s", body)
+	}
+}
+
+// TestPlaylistIsNotASegmentRequest — плейлист плеер перечитывает и встав,
+// поэтому запросом сегмента он не считается.
+func TestPlaylistIsNotASegmentRequest(t *testing.T) {
+	s := newSessionServerActive(t, map[string]string{hls.PlaylistName: "#EXTM3U\n", "index0.vtt": "WEBVTT\n"}, nil)
+	s.deps.HLS.(*fakeSessions).progress = &hls.Progress{ID: "abc"}
+	do(s, "GET", "/hls/abc/"+hls.PlaylistName, nil)
+	do(s, "GET", "/hls/abc/index0.vtt", nil)
+	if body := do(s, "GET", "/api/pipeline/abc", nil).Body.String(); !strings.Contains(body, `"sinceSegmentRequestMs":null`) {
+		t.Fatalf("плейлист или субтитры засчитаны как сегмент:\n%s", body)
 	}
 }

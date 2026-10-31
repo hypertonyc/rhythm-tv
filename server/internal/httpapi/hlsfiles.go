@@ -84,6 +84,7 @@ func (s *Server) serveHLSFile(w http.ResponseWriter, r *http.Request, sessionID,
 			// Плеер забрал сегмент — значит точку входа он уже выбрал,
 			// и окно можно открывать целиком.
 			s.notePlayerJoined(sessionID)
+			s.noteSegmentRequest(sessionID)
 		}
 	}
 
