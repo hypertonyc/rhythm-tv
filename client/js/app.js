@@ -1445,6 +1445,9 @@
                 showHud('Paused');
             } else if (state === 'PAUSED') {
                 webapis.avplay.play();
+                /* Иначе watchForStall на первом же тике засчитает всю паузу как простой и перезапустит
+                 * живой сеанс (31.10.2026: пауза 7.5 мин, на 4K перезапуск с середины стоил 19 минут). */
+                if (lastPlayTimeAt) lastPlayTimeAt = new Date().getTime();
                 showHud('Playing');
             }
         } catch (e) { showHud('Play/Pause error: ' + e.message); }
