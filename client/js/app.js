@@ -13,6 +13,11 @@
     /* Имя активного торрента (из /api/files). Под ним хранятся позиции
      * просмотра, и по нему же замечается переключение торрента с телефона. */
     var torrentKey = '';
+    var torrents = [];
+    var activeTorrentId = null;
+    var torrentPos = 0;
+    var torrentPosting = false;
+    var torrentSwitchGeneration = 0;
     var lastLibraryCheck = 0;
     var lostSessionPolls = 0;
     /* id сеанса, который мы сейчас играем: по нему отличается «сеанс погасили»
@@ -27,6 +32,7 @@
     var subPos = 0; /* 0 = off, then meta.subtitles + 1 */
     var autoNext = true;
     var menuRow = 0;
+    var settingsRow = 0;
     var setupRow = 0;
     var mode = 'boot';
     var startOffset = 0;
@@ -84,7 +90,8 @@
     ];
     var subtitleSizePos = 2;
 
-    var menuRows = ['season', 'episode', 'audio', 'sub', 'subsize', 'autonext', 'play', 'server'];
+    var menuRows = ['torrent', 'season', 'episode', 'audio', 'sub', 'autonext', 'play', 'settings'];
+    var settingsRows = ['subsize', 'server'];
     /* Индекс серии, которую попросили начать с начала; для остальных Play продолжает. */
     var startOverFor = null;
 
@@ -231,12 +238,16 @@
     }
 
     function api(path, callback, timeout) {
+        apiRequest('GET', path, callback, timeout);
+    }
+
+    function apiRequest(method, path, callback, timeout) {
         var xhr = new XMLHttpRequest();
         var url = serverBase + path;
         var settle;
         timeout = timeout || 12000;
         settle = guardedRequest(xhr, url, timeout, callback);
-        xhr.open('GET', url, true);
+        xhr.open(method, url, true);
         xhr.timeout = timeout;
         xhr.onreadystatechange = function () {
             if (xhr.readyState !== 4) return;
@@ -659,7 +670,7 @@
         subtitleSizePos = (subtitleSizePos + delta + subtitleSizes.length) % subtitleSizes.length;
         storeSet('rtv.subtitleSize', subtitleSizes[subtitleSizePos].key);
         applySubtitleSize();
-        refreshMenu();
+        refreshSettings();
     }
 
     function choosePreferredTracks() {
@@ -691,6 +702,7 @@
         mode = 'setup';
         el('playerScreen').className = 'player-screen hidden';
         el('menuScreen').className = 'screen hidden';
+        el('settingsScreen').className = 'screen hidden';
         el('setupScreen').className = 'screen';
         el('av-player').style.display = 'none';
         el('serverInput').value = serverBase || DEFAULT_SERVER;
@@ -735,6 +747,7 @@
         }
         showMenu();
         refreshMeta();
+        loadTorrents();
         startStatusPolling();
     }
 
@@ -744,8 +757,10 @@
      * чужую серию. Сравнивается имя торрента: отдельного поля в /api/files нет,
      * а менять его формат ради этого не стоит — он заморожен. */
     function checkLibrary() {
+        var generation = torrentSwitchGeneration;
         api('/api/files', function (err, data) {
-            if (err || !data) return;
+            /* Ответ, отправленный до переключения с пульта, вернул бы список прежнего торрента. */
+            if (err || !data || generation !== torrentSwitchGeneration) return;
             var name = data.torrent || '';
             if (name === torrentKey) return;
             meta = null;
@@ -758,6 +773,7 @@
         mode = 'menu';
         el('setupScreen').className = 'screen hidden';
         el('playerScreen').className = 'player-screen hidden';
+        el('settingsScreen').className = 'screen hidden';
         el('menuScreen').className = 'screen';
         el('av-player').style.display = 'none';
         refreshMenu();
@@ -773,7 +789,18 @@
     function refreshMenu() {
         var s = currentSeason();
         var ep = currentEpisode();
-        if (!s || !ep) return;
+        var blank = ['seasonValue', 'episodeValue', 'audioValue', 'subValue', 'playValue'];
+        var i;
+        el('torrentLabel').innerHTML = torrentPending() ? 'Switch to' : 'Torrent';
+        el('torrentValue').innerHTML = torrentRowText();
+        el('autonextValue').innerHTML = '‹  ' + (autoNext ? 'On' : 'Off') + '  ›';
+        refreshMenuFocus();
+        if (!s || !ep) {
+            el('episodeTitle').innerHTML = torrentKey ? 'No video files in this torrent' : 'Opening the torrent…';
+            el('episodeMeta').innerHTML = '';
+            for (i = 0; i < blank.length; i++) el(blank[i]).innerHTML = '—';
+            return;
+        }
         el('seasonValue').innerHTML = '‹  ' + s.label + '  ›';
         el('episodeValue').innerHTML = '‹  ' + ep.label + '  ›';
         el('episodeTitle').innerHTML = ep.label;
@@ -791,18 +818,123 @@
             el('audioValue').innerHTML = '…';
             el('subValue').innerHTML = '…';
         }
-        el('subtitleSizeValue').innerHTML = '‹  ' + subtitleSizes[subtitleSizePos].label + ' (' + subtitleSizes[subtitleSizePos].px + ' px)  ›';
-        el('autonextValue').innerHTML = '‹  ' + (autoNext ? 'On' : 'Off') + '  ›';
         var saved = savedPosition(ep.index);
         if (saved <= 10) el('playValue').innerHTML = 'Start  ▶';
         else if (startOverFor === ep.index) el('playValue').innerHTML = '‹  From the start  ›  ▶';
         else el('playValue').innerHTML = '‹  Resume from ' + fmt(saved) + '  ›  ▶';
-        el('serverValue').innerHTML = serverBase;
-        refreshMenuFocus();
+    }
+
+    function showSettings() {
+        mode = 'settings';
+        el('menuScreen').className = 'screen hidden';
+        el('settingsScreen').className = 'screen';
+        refreshSettings();
+    }
+
+    function refreshSettings() {
+        var i;
+        el('subtitleSizeValue').innerHTML = '‹  ' + subtitleSizes[subtitleSizePos].label + ' (' + subtitleSizes[subtitleSizePos].px + ' px)  ›';
+        el('serverValue').innerHTML = escapeHtml(serverBase);
+        for (i = 0; i < settingsRows.length; i++) {
+            el('settings-' + settingsRows[i]).className = 'menu-row' + (i === settingsRow ? ' focused' : '');
+        }
+    }
+
+    function torrentIndex(id) {
+        var i;
+        for (i = 0; i < torrents.length; i++) {
+            if (torrents[i].id === id) return i;
+        }
+        return -1;
+    }
+
+    function torrentPending() {
+        var t = torrents[torrentPos];
+        return !!t && t.id !== activeTorrentId;
+    }
+
+    function torrentRowText() {
+        var t = torrents[torrentPos];
+        if (!t) return escapeHtml(torrentKey || '—');
+        if (torrents.length < 2) return escapeHtml(t.name);
+        return '‹  ' + escapeHtml(t.name) + '  ›' + (torrentPending() ? '  ▶' : '');
+    }
+
+    function applyTorrents(data) {
+        var cursor = torrentPending() ? torrents[torrentPos].id : null;
+        var pos;
+        torrents = data.torrents;
+        activeTorrentId = data.active;
+        pos = cursor === null ? -1 : torrentIndex(cursor);
+        torrentPos = pos >= 0 ? pos : Math.max(0, torrentIndex(activeTorrentId));
+        if (mode === 'menu') refreshMenu();
+    }
+
+    /* Ошибка не трогает ряд: у сервера старше библиотеки торрентов этой ручки нет,
+     * и тогда ряд просто показывает имя из /api/files. */
+    function loadTorrents() {
+        api('/api/torrents?_=' + new Date().getTime(), function (err, data) {
+            if (err || !data || !data.torrents) return;
+            applyTorrents(data);
+        }, 8000);
+    }
+
+    function changeTorrent(delta) {
+        if (torrents.length < 2) return;
+        torrentPos = (torrentPos + delta + torrents.length) % torrents.length;
+        refreshMenu();
+    }
+
+    function switchTorrent() {
+        var target = torrents[torrentPos];
+        if (!torrentPending()) {
+            loadTorrents();
+            return;
+        }
+        torrentPosting = true;
+        setStatus('Switching to ' + escapeHtml(target.name) + '…', 'warn');
+        apiRequest('POST', '/api/torrents/' + encodeURIComponent(target.id) + '/activate', function (err, data) {
+            torrentPosting = false;
+            if (err || !data || !data.torrents) {
+                setStatus('Cannot switch to ' + escapeHtml(target.name) + ': ' + escapeHtml(err ? err.message : 'bad response'), 'error');
+                loadTorrents();
+                checkLibrary();
+                return;
+            }
+            /* Индексы прежнего списка уже указывают на файлы нового торрента: Play по ним
+             * открыл бы чужую серию, поэтому до ответа /api/files список пуст. */
+            var generation = ++torrentSwitchGeneration;
+            torrentKey = '';
+            episodes = [];
+            seasons = [];
+            seasonPos = 0;
+            episodePos = 0;
+            meta = null;
+            startOverFor = null;
+            el('torrentTitle').innerHTML = escapeHtml(target.name);
+            setStatus('Opening ' + escapeHtml(target.name) + '…', 'warn');
+            applyTorrents(data);
+            waitForTorrentLibrary(generation);
+        }, 30000);
+    }
+
+    /* Новый торрент готов не сразу: сервер сначала разогревает рой, и до этого
+     * /api/files отвечает 503. Десятисекундного опроса меню ждать незачем. */
+    function waitForTorrentLibrary(generation) {
+        api('/api/files', function (err, data) {
+            if (generation !== torrentSwitchGeneration || torrentKey) return;
+            if (err || !data || mode !== 'menu') {
+                setTimeout(function () { waitForTorrentLibrary(generation); }, 1500);
+                return;
+            }
+            loadLibrary(data);
+            setStatus('Torrent switched to ' + escapeHtml(data.torrent || ''), 'ok');
+        }, 8000);
     }
 
     function refreshMeta(callback) {
         var ep = currentEpisode();
+        var key = torrentKey;
         if (!ep) return;
         meta = null;
         refreshMenu();
@@ -815,7 +947,8 @@
              * Ловится это только на разной длительности проб: пока разбор
              * приходил из кэша мгновенно, обгонять было нечему. */
             var still = currentEpisode();
-            if (!still || Number(still.index) !== Number(ep.index)) {
+            /* Торрент сверяется отдельно: после переключения тот же индекс — уже другой файл. */
+            if (!still || Number(still.index) !== Number(ep.index) || torrentKey !== key) {
                 if (callback) callback(new Error('Episode changed'));
                 return;
             }
@@ -1634,27 +1767,47 @@
         statusTimer = setInterval(refreshServerStatus, 2000);
     }
 
+    function moveMenuFocus(delta) {
+        var leaving = menuRows[menuRow];
+        menuRow = (menuRow + delta + menuRows.length) % menuRows.length;
+        /* Выбор в ряду Torrent переключает только по Enter: ушли с ряда — от выбора отказались. */
+        if (leaving === 'torrent') torrentPos = Math.max(0, torrentIndex(activeTorrentId));
+        if (menuRows[menuRow] === 'torrent') loadTorrents();
+        refreshMenu();
+    }
+
     function menuLeftRight(delta) {
         var row = menuRows[menuRow];
-        if (row === 'season') changeSeason(delta);
+        if (row === 'torrent') changeTorrent(delta);
+        else if (row === 'season') changeSeason(delta);
         else if (row === 'episode') changeEpisode(delta);
         else if (row === 'audio') changeAudio(delta);
         else if (row === 'sub') changeSub(delta);
-        else if (row === 'subsize') changeSubtitleSize(delta);
         else if (row === 'autonext') toggleAutoNext();
         else if (row === 'play') toggleStartOver();
+        else if (row === 'settings' && delta > 0) showSettings();
     }
 
     function menuEnter() {
         var row = menuRows[menuRow];
         if (row === 'play') playFromMenu();
-        else if (row === 'server') showSetup('');
+        else if (row === 'torrent') switchTorrent();
+        else if (row === 'settings') showSettings();
         else if (row === 'autonext') toggleAutoNext();
         else if (row === 'season') changeSeason(1);
         else if (row === 'episode') changeEpisode(1);
         else if (row === 'audio') changeAudio(1);
         else if (row === 'sub') changeSub(1);
-        else if (row === 'subsize') changeSubtitleSize(1);
+    }
+
+    function settingsLeftRight(delta) {
+        if (settingsRows[settingsRow] === 'subsize') changeSubtitleSize(delta);
+    }
+
+    function settingsEnter() {
+        var row = settingsRows[settingsRow];
+        if (row === 'subsize') changeSubtitleSize(1);
+        else if (row === 'server') showSetup('');
     }
 
     function exitApp() {
@@ -1702,16 +1855,25 @@
         }
 
         if (mode === 'menu') {
-            if (code === UP) {
-                menuRow = (menuRow - 1 + menuRows.length) % menuRows.length;
-                refreshMenuFocus();
-            } else if (code === DOWN) {
-                menuRow = (menuRow + 1) % menuRows.length;
-                refreshMenuFocus();
-            } else if (code === LEFT) menuLeftRight(-1);
+            /* Пока сервер переключает торрент, Play ушёл бы на файл прежнего. */
+            if (torrentPosting && code !== BACK) return;
+            if (code === UP) moveMenuFocus(-1);
+            else if (code === DOWN) moveMenuFocus(1);
+            else if (code === LEFT) menuLeftRight(-1);
             else if (code === RIGHT) menuLeftRight(1);
             else if (code === ENTER) menuEnter();
             else if (code === BACK) exitApp();
+            return;
+        }
+
+        if (mode === 'settings') {
+            if (code === UP || code === DOWN) {
+                settingsRow = (settingsRow + (code === UP ? -1 : 1) + settingsRows.length) % settingsRows.length;
+                refreshSettings();
+            } else if (code === LEFT) settingsLeftRight(-1);
+            else if (code === RIGHT) settingsLeftRight(1);
+            else if (code === ENTER) settingsEnter();
+            else if (code === BACK) showMenu();
             return;
         }
 
@@ -1730,6 +1892,7 @@
         serverBase = cleanBase(storeGet('rtv.server', DEFAULT_SERVER));
         autoNext = storeGet('rtv.autonext', '1') !== '0';
         loadSubtitleSize();
+        menuRow = menuRows.indexOf('season');
 
         /* Put a screen up before touching the network — a slow or refused request
          * must never leave the TV on a black screen. */
