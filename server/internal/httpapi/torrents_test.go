@@ -218,8 +218,8 @@ func TestTorrentsList(t *testing.T) {
 		t.Fatalf("код %d", rec.Code)
 	}
 	// Пустой список — [], а не null: клиент читает .length без проверки.
-	// active и storage — именно null, а не отсутствующие ключи.
-	if got := rec.Body.String(); got != `{"active":null,"torrents":[],"storage":null}` {
+	// active, storage и swarm — именно null, а не отсутствующие ключи.
+	if got := rec.Body.String(); got != `{"active":null,"torrents":[],"storage":null,"swarm":null}` {
 		t.Errorf("тело %q", got)
 	}
 
@@ -229,7 +229,7 @@ func TestTorrentsList(t *testing.T) {
 	}}, id)
 	rec = do(s, http.MethodGet, "/api/torrents", nil)
 	want := `{"active":"` + id + `","torrents":[{"id":"` + id +
-		`","name":"Сериал","file":"Сериал.torrent","length":42,"files":2,"addedAt":1700000000000,"active":true}],"storage":null}`
+		`","name":"Сериал","file":"Сериал.torrent","length":42,"files":2,"addedAt":1700000000000,"active":true}],"storage":null,"swarm":null}`
 	if got := rec.Body.String(); got != want {
 		t.Errorf("тело\n  %q\nожидалось\n  %q", got, want)
 	}
@@ -487,7 +487,28 @@ func TestTorrentsListReportsStorage(t *testing.T) {
 
 	rec := do(s, http.MethodGet, "/api/torrents", nil)
 	want := `{"active":null,"torrents":[],"storage":{"free":20401094656,"minFree":10737418240,` +
-		`"evicted":3,"evictedBytes":2147483648,"lastEvictedAt":1755400000000}}`
+		`"evicted":3,"evictedBytes":2147483648,"lastEvictedAt":1755400000000},"swarm":null}`
+	if got := rec.Body.String(); got != want {
+		t.Errorf("тело\n  %q\nожидалось\n  %q", got, want)
+	}
+}
+
+// TestTorrentsListReportsSwarmBeforeReady — пока сервер разогревает рой,
+// /api/status молчит, и пиров со скоростью телевизору больше взять негде.
+func TestTorrentsListReportsSwarmBeforeReady(t *testing.T) {
+	fake, err := mediasource.NewFake("сериал")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.NotReady = true
+	fake.SetStats(mediasource.Stats{Peers: 1, DownloadSpeed: 13107.2, Downloaded: 2179072, Progress: 0.0013})
+
+	calls := make([]string, 0)
+	lib := &fakeLibrary{calls: &calls, current: fake}
+	s := New(Deps{Library: lib, HLS: &fakeSessions{calls: &calls}})
+
+	rec := do(s, http.MethodGet, "/api/torrents", nil)
+	want := `{"active":null,"torrents":[],"storage":null,"swarm":{"peers":1,"downloadSpeed":13107.2}}`
 	if got := rec.Body.String(); got != want {
 		t.Errorf("тело\n  %q\nожидалось\n  %q", got, want)
 	}

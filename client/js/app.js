@@ -18,6 +18,10 @@
     var torrentPos = 0;
     var torrentPosting = false;
     var torrentSwitchGeneration = 0;
+    var torrentSwitchStartedAt = 0;
+    /* Пиры и скорость активного торрента: из /api/torrents (там они есть и до готовности)
+     * и из /api/status. По ним видно, что ждём рой, а не зависли. */
+    var swarm = null;
     var lastLibraryCheck = 0;
     var lostSessionPolls = 0;
     /* id сеанса, который мы сейчас играем: по нему отличается «сеанс погасили»
@@ -804,7 +808,7 @@
         refreshMenuFocus();
         if (!s || !ep) {
             el('episodeTitle').innerHTML = torrentKey ? 'No video files in this torrent' : 'Opening the torrent…';
-            el('episodeMeta').innerHTML = '';
+            el('episodeMeta').innerHTML = torrentKey || !torrentSwitchStartedAt ? '' : switchWaitText();
             for (i = 0; i < blank.length; i++) el(blank[i]).innerHTML = '—';
             return;
         }
@@ -847,6 +851,15 @@
         }
     }
 
+    function swarmText() {
+        return swarm ? swarm.peers + ' peers · ' + fmtSpeed(swarm.downloadSpeed) : '';
+    }
+
+    function switchWaitText() {
+        var waited = fmt(Math.floor((new Date().getTime() - torrentSwitchStartedAt) / 1000));
+        return 'Warming up the swarm' + (swarm ? ' · ' + swarmText() : '') + ' · ' + waited;
+    }
+
     function torrentIndex(id) {
         var i;
         for (i = 0; i < torrents.length; i++) {
@@ -872,6 +885,7 @@
         var pos;
         torrents = data.torrents;
         activeTorrentId = data.active;
+        if (data.swarm) swarm = data.swarm;
         pos = cursor === null ? -1 : torrentIndex(cursor);
         torrentPos = pos >= 0 ? pos : Math.max(0, torrentIndex(activeTorrentId));
         if (mode === 'menu') refreshMenu();
@@ -911,6 +925,8 @@
             /* Индексы прежнего списка уже указывают на файлы нового торрента: Play по ним
              * открыл бы чужую серию, поэтому до ответа /api/files список пуст. */
             var generation = ++torrentSwitchGeneration;
+            torrentSwitchStartedAt = new Date().getTime();
+            swarm = null;
             torrentKey = '';
             episodes = [];
             seasons = [];
@@ -931,6 +947,7 @@
         api('/api/files', function (err, data) {
             if (generation !== torrentSwitchGeneration || torrentKey) return;
             if (err || !data || mode !== 'menu') {
+                if (err && err.status === 503) loadTorrents();
                 setTimeout(function () { waitForTorrentLibrary(generation); }, 1500);
                 return;
             }
@@ -960,7 +977,8 @@
                 return;
             }
             if (err) {
-                setStatus('Probe failed: ' + err.message, 'error');
+                /* Мёртвая раздача выглядит здесь как таймаут ffprobe: пиры рядом объясняют его. */
+                setStatus('Probe failed: ' + err.message + (swarm ? ' · ' + swarmText() : ''), 'error');
                 if (callback) callback(err);
                 return;
             }
@@ -1673,14 +1691,15 @@
                 el('serverStatus').innerHTML = 'Torrent metadata loading…';
                 return;
             }
-            el('serverStatus').innerHTML = s.peers + ' peers · ' + fmtSpeed(s.downloadSpeed);
+            swarm = { peers: s.peers, downloadSpeed: s.downloadSpeed };
+            el('serverStatus').innerHTML = swarmText();
             if (waitStartedAt) {
                 /* Пока идёт чёрный экран, статусом распоряжается карточка,
                  * и писать в hudStatus отсюда нельзя: именно две строки
                  * в разных форматах, менявшиеся наперегонки, и выглядели
                  * как «статус мигает и ничего не понятно». Пиры и скорость
                  * при этом нужны — на них видно, что ждём мы рой. */
-                waitSwarm = s.peers + ' peers · ' + fmtSpeed(s.downloadSpeed);
+                waitSwarm = swarmText();
                 renderWait();
             } else if (mode === 'player' && s.playback && s.playback.state && s.playback.state !== 'ready' && s.playback.state !== 'finished') {
                 el('hudStatus').innerHTML = 'Server: ' + s.playback.state + ' · ' + (s.playback.segments || 0) + ' segments';

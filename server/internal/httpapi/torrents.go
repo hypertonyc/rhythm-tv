@@ -151,11 +151,25 @@ func (s *Server) writeLibrary(w http.ResponseWriter, status int) {
 		storage = &snap
 	}
 
+	// Рой едет и до готовности: /api/status тогда заморожен на {"ready":false},
+	// и иначе телевизору нечем объяснить, чего он ждёт после переключения.
+	var swarm *swarmInfo
+	if src := s.deps.Library.Current(); src != nil {
+		st := src.Stats()
+		swarm = &swarmInfo{Peers: st.Peers, DownloadSpeed: st.DownloadSpeed}
+	}
+
 	writeJSON(w, status, struct {
 		Active   *string           `json:"active"`
 		Torrents []library.Entry   `json:"torrents"`
 		Storage  *reclaim.Snapshot `json:"storage"`
-	}{Active: active, Torrents: entries, Storage: storage})
+		Swarm    *swarmInfo        `json:"swarm"`
+	}{Active: active, Torrents: entries, Storage: storage, Swarm: swarm})
+}
+
+type swarmInfo struct {
+	Peers         int     `json:"peers"`
+	DownloadSpeed float64 `json:"downloadSpeed"`
 }
 
 // uploadBody достаёт содержимое .torrent из запроса.

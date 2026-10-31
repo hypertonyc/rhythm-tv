@@ -33,6 +33,7 @@ type Client struct {
 	readahead    int64
 	verify       bool
 	warmupBytes  int64
+	warmupLimit  time.Duration
 	onFileHealed func(storePath string)
 }
 
@@ -58,6 +59,8 @@ type Options struct {
 	// WarmupBytes — сколько байт прочитать при старте, чтобы поднять рой.
 	// Ноль отключает разогрев. См. warmSwarm.
 	WarmupBytes int64
+	// WarmupLimit — дольше разогрев готовность не держит. Ноль — ждать сколько угодно.
+	WarmupLimit time.Duration
 	// PersistStore оставляет скачанное на диске после остановки.
 	//
 	// Node стирал хранилище всегда (destroyStoreOnDestroy: true), и порт это
@@ -116,6 +119,7 @@ func NewClient(opts Options) (*Client, error) {
 		readahead:    opts.Readahead,
 		verify:       opts.VerifyOnStart,
 		warmupBytes:  opts.WarmupBytes,
+		warmupLimit:  opts.WarmupLimit,
 		onFileHealed: opts.OnFileHealed,
 	}, nil
 }
@@ -193,7 +197,7 @@ func (c *Client) Add(torrentPath string) (*Torrent, error) {
 		// Уже начатый до выкатки просмотр это не задевает: его сегменты
 		// лежат на диске, а подобранный сеанс отдаётся без участия торрента.
 		if c.warmupBytes > 0 {
-			tr.warmSwarm(t, c.warmupBytes)
+			tr.warmSwarm(t, c.warmupBytes, c.warmupLimit)
 		}
 
 		tr.ready.Store(true)
@@ -431,7 +435,7 @@ func humanBytes(n int64) string {
 //
 // Читается ПОСЛЕ снятия флага готовности: разогрев не задерживает ответы
 // сервера, он лишь сокращает окно. Ошибка не важна — это оптимизация.
-func (tr *Torrent) warmSwarm(t *torrent.Torrent, want int64) {
+func (tr *Torrent) warmSwarm(t *torrent.Torrent, want int64, limit time.Duration) {
 	files := t.Files()
 	if len(files) == 0 {
 		return
@@ -440,8 +444,19 @@ func (tr *Torrent) warmSwarm(t *torrent.Torrent, want int64) {
 	defer r.Close()
 
 	started := time.Now()
-	n, err := io.CopyN(io.Discard, ctxReader{ctx: tr.ctx, r: r}, want)
+	n, err := warmRead(tr.ctx, r, want, limit)
 	log.Printf("swarm warmup: %s in %s, peers=%d (err=%v)",
 		humanBytes(n), time.Since(started).Round(time.Millisecond),
 		t.Stats().ActivePeers, err)
+}
+
+// Срок нужен мёртвой раздаче: читатель ждёт кусок целиком, и 31.10.2026 при одном пире
+// на 13 КБ/с готовность ждала 2 минуты, а без пиров не дождалась бы никогда.
+func warmRead(ctx context.Context, r Reader, want int64, limit time.Duration) (int64, error) {
+	if limit > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, limit)
+		defer cancel()
+	}
+	return io.CopyN(io.Discard, ctxReader{ctx: ctx, r: r}, want)
 }
