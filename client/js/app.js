@@ -1286,10 +1286,12 @@
                 showHud('HLS generation failed');
                 return;
             }
-            /* Сеанс остановлен или заменён более новым /api/start: сегменты ещё
-             * лежат на сервере, но открывать их нельзя. Выходим молча, не трогая
-             * restarting и HUD — ими распоряжается опрос, заменивший этот. */
-            if (s.state === 'stopped' || s.state === 'replaced') return;
+            /* Свою замену уже отсекла проверка startGeneration, значит сеанс погасил кто-то другой.
+             * Молчаливый выход оставлял restarting взведённым, а с ним и все сторожа (23.10.2026). */
+            if (s.state === 'stopped' || s.state === 'replaced') {
+                stopPlayback(true, 'Playback was stopped on the server.');
+                return;
+            }
             if ((s.segments || 0) >= startupSegmentsNeeded() || s.state === 'finished') {
                 openPlaylist(generation, serverBase + playlist + '?_=' + new Date().getTime());
                 return;
@@ -1486,7 +1488,8 @@
         cancelPendingSeek();
         closeAvplay();
         resetSubtitles();
-        apiIgnore('/api/stop');
+        /* Без /api/stop: прежний сеанс заменит /api/start, а stop, обогнанный им по сети,
+         * гасил уже новый сеанс (23.10.2026, проба следующей серии пришла из кэша). */
         if (!selectEpisodeIndex(meta.next)) {
             stopPlayback(true, 'Next episode not found.');
             return;
