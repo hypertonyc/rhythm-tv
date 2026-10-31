@@ -52,6 +52,11 @@ func (f slogCancelFilter) Handle(ctx context.Context, r slog.Record) error {
 	if strings.Contains(r.Message, "context canceled") {
 		return nil
 	}
+	// v1.61.0 делает flush ".part" и при выключенных part-файлах (promotePartFile):
+	// строка на каждый докачанный файл, а файла такого у нас не бывает. См. partfile.go.
+	if r.Message == "error flushing file before promotion" {
+		return nil
+	}
 	drop := false
 	r.Attrs(func(a slog.Attr) bool {
 		// Ключ "err" — то, как anacrolix кладёт причину в reader.go.
