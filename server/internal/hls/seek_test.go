@@ -91,11 +91,8 @@ func TestSeekAlignsToKeyframeAndCopies(t *testing.T) {
 		t.Errorf("снимок отдаёт start %v, ожидалось 186.086", snap.Start)
 	}
 	line := args()
-	if !strings.Contains(line, "-ss "+want) {
-		t.Errorf("в argv ушла другая секунда:\n%s", line)
-	}
-	if strings.Contains(line, "-ss 195") {
-		t.Errorf("в argv ушла запрошенная секунда, а не выровненная:\n%s", line)
+	if got := effectiveSeek(line); got != want {
+		t.Errorf("в argv ушла секунда %s, а не выровненная %s:\n%s", got, want, line)
 	}
 	if !strings.Contains(line, "-c:v copy") || !strings.Contains(line, "-c:a copy") {
 		t.Errorf("выровненная перемотка обязана копироваться:\n%s", line)
@@ -122,7 +119,7 @@ func TestSeekWithoutKeyframeFallsBackToTranscode(t *testing.T) {
 	if snap.Start != 195 {
 		t.Errorf("start сдвинулся без ключевого кадра: %v", snap.Start)
 	}
-	if line := args(); !strings.Contains(line, "-c:v libx264") || !strings.Contains(line, "-ss 195.000") {
+	if line := args(); !strings.Contains(line, "-c:v libx264") || effectiveSeek(line) != "195.000" {
 		t.Errorf("ожидалось прежнее поведение:\n%s", line)
 	}
 	if snap.VideoMode != "transcode" {
@@ -157,7 +154,7 @@ func TestSeekSkipsKeyframeLookupWhenPointless(t *testing.T) {
 		if asked() != 0 {
 			t.Error("hevc не скопируется ни с какой точки — искать нечего")
 		}
-		if line := args(); !strings.Contains(line, "-ss 195.000") {
+		if line := args(); effectiveSeek(line) != "195.000" {
 			t.Errorf("перекодирование обязано попадать в запрошенную секунду:\n%s", line)
 		}
 	})
@@ -213,4 +210,12 @@ func TestSeekShiftsExternalSubtitlesByAlignedStart(t *testing.T) {
 	if !strings.Contains(string(vtt), "00:03.914") {
 		t.Errorf("реплика сдвинута не на выровненный start:\n%s", vtt)
 	}
+}
+
+func effectiveSeek(line string) string {
+	args := mergeSplitSeek(strings.Fields(line))
+	if i := indexOf(args, "-ss"); i >= 0 {
+		return args[i+1]
+	}
+	return ""
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/avdav/torrent-media/server/internal/jscompat"
 	"github.com/avdav/torrent-media/server/internal/media"
 )
 
@@ -100,22 +101,37 @@ func TestBuildArgsMatchesNodeGolden(t *testing.T) {
 	}
 }
 
-// TestBuildArgsSeekPlacement фиксирует то, что легко «поправить» при рефакторинге:
-// -ss обязан стоять ПОСЛЕ -i. Перенос его вперёд ускорил бы перемотку,
-// но развалил бы тайминги встроенных субтитров.
+// TestBuildArgsSeekPlacement — перемотка делится надвое: прыжок демуксера ДО -i, без которого ffmpeg
+// декодирует серию с начала, и короткий хвост ПОСЛЕ -i, на котором держатся тайминги встроенных субтитров.
 func TestBuildArgsSeekPlacement(t *testing.T) {
-	args := BuildArgs(Params{
-		RawURL: "http://127.0.0.1:8000/raw/1", Dir: "/tmp/d", Video: &media.VideoInfo{}, Start: 90,
-	})
-	iInput, iSeek := indexOf(args, "-i"), indexOf(args, "-ss")
-	if iSeek < 0 {
-		t.Fatal("-ss не попал в аргументы")
+	cases := []struct {
+		start         float64
+		input, output string
+	}{
+		{90, "87.000", "3.000"},
+		{1268.696, "1265.696", "3.000"},
+		{3.04, "", "3.040"},
+		{2, "", "2.000"},
+		{0.05, "", ""},
 	}
-	if iSeek < iInput {
-		t.Errorf("-ss оказался перед -i: %s", strings.Join(args, " "))
-	}
-	if args[iSeek+1] != "90.000" {
-		t.Errorf("-ss %q, ожидалось 90.000 (toFixed(3))", args[iSeek+1])
+	for _, c := range cases {
+		args := BuildArgs(Params{RawURL: "u", Dir: "/tmp/d", Video: &media.VideoInfo{}, Start: c.start})
+		iInput := indexOf(args, "-i")
+		var input, output string
+		for i, a := range args {
+			if a != "-ss" {
+				continue
+			}
+			if i < iInput {
+				input = args[i+1]
+			} else {
+				output = args[i+1]
+			}
+		}
+		if input != c.input || output != c.output {
+			t.Errorf("start %v: -ss до -i %q, после %q; ожидалось %q и %q\n%s",
+				c.start, input, output, c.input, c.output, strings.Join(args, " "))
+		}
 	}
 }
 
@@ -188,6 +204,7 @@ func indexOf(args []string, want string) int {
 // Каждый из них закрывает болезнь, которая была и в эталоне (см. args.go):
 // переподключение ко входу, тип плейлиста EVENT и машинный отчёт о ходе
 // работы, без которого телевизору нечего показать на чёрном экране.
+// Разделённая перемотка сводится обратно в один -ss после -i (mergeSplitSeek).
 func stripLocalAdditions(args []string) []string {
 	skip := map[string]bool{
 		"-reconnect":                  true,
@@ -205,6 +222,24 @@ func stripLocalAdditions(args []string) []string {
 		}
 		out = append(out, args[i])
 	}
+	return mergeSplitSeek(out)
+}
+
+// mergeSplitSeek складывает прыжок демуксера с output-side хвостом: эталон ставит всю секунду после -i,
+// и точка входа у них одна — отличается только то, сколько ffmpeg декодирует до неё.
+func mergeSplitSeek(args []string) []string {
+	pre := indexOf(args, "-ss")
+	if pre < 0 || pre > indexOf(args, "-i") {
+		return args
+	}
+	out := append(append([]string{}, args[:pre]...), args[pre+2:]...)
+	post := indexOf(out, "-ss")
+	if post < 0 {
+		return args
+	}
+	preSec, _ := strconv.ParseFloat(args[pre+1], 64)
+	postSec, _ := strconv.ParseFloat(out[post+1], 64)
+	out[post+1] = jscompat.ToFixed(preSec+postSec, 3)
 	return out
 }
 

@@ -15,6 +15,17 @@ import (
 // и -ss в аргументы не попадает вовсе.
 const seekThreshold = 0.05
 
+// preSeekMargin — сколько секунд перед start дорезает output-side -ss после прыжка демуксера.
+// Запас на неточный прыжок у контейнеров без индекса (TS, AVI): промах вперёд молча съел бы начало.
+const preSeekMargin = 3.0
+
+func splitSeek(start float64) (input, output float64) {
+	if start <= preSeekMargin+seekThreshold {
+		return 0, start
+	}
+	return start - preSeekMargin, preSeekMargin
+}
+
 // PlaylistName — единственный плейлист, который открывает плеер. Имя задаём мы
 // сами (последний аргумент ffmpeg), и httpapi дописывает в него EXT-X-START
 // на отдаче, поэтому имя вынесено из литералов: разъехавшись, они превратили бы
@@ -103,12 +114,18 @@ func BuildArgs(p Params) []string {
 		args = append(args, "-skip_loop_filter", "all")
 	}
 
+	// Один output-side -ss прогонял через декодер и фильтры всё с начала серии: 4K с 21-й минуты
+	// ждал картинку ~19 минут. Демуксер прыгает по индексу, а на output-side остаётся короткий запас.
+	inputSeek, outputSeek := splitSeek(p.Start)
+	if inputSeek > 0 {
+		args = append(args, "-ss", jscompat.ToFixed(inputSeek, 3))
+	}
+
 	args = append(args, "-i", p.RawURL)
 
-	// -ss ПОСЛЕ -i — это output-side seek, и так задумано: иначе разъезжаются
-	// тайминги встроенных субтитров при продолжении с середины.
-	if p.Start > seekThreshold {
-		args = append(args, "-ss", jscompat.ToFixed(p.Start, 3))
+	// Хвост перемотки — после -i: на output-side -ss держатся тайминги встроенных субтитров (setts ниже).
+	if outputSeek > seekThreshold {
+		args = append(args, "-ss", jscompat.ToFixed(outputSeek, 3))
 	}
 
 	args = append(args, "-map", "0:"+strconv.Itoa(p.Video.Index))
@@ -134,8 +151,9 @@ func BuildArgs(p Params) []string {
 		args = append(args, "-c:s", "webvtt")
 		// До муксера, а не на отдаче: HLS раскладывает реплики по файлам по их времени, и при
 		// перекодировании реплика с временем серии появлялась бы на start секунд позже, чем нужна.
-		if p.ShiftSubtitles && p.Start > seekThreshold {
-			args = append(args, "-bsf:s", "setts=ts=TS-"+jscompat.ToFixed(p.Start, 3)+"/TB")
+		// Сдвиг — ровно output-side часть: входную ffmpeg применяет к субтитрам сам, вместе со всеми потоками.
+		if p.ShiftSubtitles && outputSeek > seekThreshold {
+			args = append(args, "-bsf:s", "setts=ts=TS-"+jscompat.ToFixed(outputSeek, 3)+"/TB")
 		}
 	} else {
 		args = append(args, "-sn")

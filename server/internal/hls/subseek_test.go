@@ -77,8 +77,9 @@ func TestEmbeddedSubtitlesShiftByAlignedStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	line := args()
-	if !strings.Contains(line, "-ss 186.086") || !strings.Contains(line, "-bsf:s setts=ts=TS-186.086/TB") {
-		t.Errorf("субтитры обязаны сдвигаться на ту же секунду, что ушла в -ss:\n%s", line)
+	if !strings.Contains(line, "-ss 183.086 ") || !strings.Contains(line, "-ss 3.000 ") ||
+		!strings.Contains(line, "-bsf:s setts=ts=TS-3.000/TB") {
+		t.Errorf("субтитры обязаны сдвигаться ровно на output-side часть выровненной перемотки:\n%s", line)
 	}
 }
 
@@ -100,7 +101,7 @@ func TestSubtitleShiftOnlyWhereFfmpegLeftEpisodeTime(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			c.p.RawURL, c.p.Dir, c.p.Video = "u", "/tmp/d", copyableEpisode().Video
 			line := strings.Join(BuildArgs(c.p), " ")
-			if got := strings.Contains(line, "-bsf:s setts=ts=TS-186.086/TB"); got != c.shift {
+			if got := strings.Contains(line, "-bsf:s setts=ts=TS-3.000/TB"); got != c.shift {
 				t.Errorf("сдвиг субтитров %v, ожидался %v:\n%s", got, c.shift, line)
 			}
 		})

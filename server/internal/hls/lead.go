@@ -17,7 +17,7 @@ const (
 )
 
 // outputRate — секунд видео за секунду времени, считая от первого готового сегмента:
-// декодирование с начала серии, которое делает output-side -ss, сюда не попадает.
+// разгон до первого сегмента сюда не попадает.
 func outputRate(s *Session, now int64) (float64, bool) {
 	intervals := s.segments - s.firstOutputSegs
 	if s.firstOutputAt == 0 || intervals < 2 || now <= s.firstOutputAt {
