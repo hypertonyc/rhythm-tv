@@ -93,6 +93,9 @@
     var subtitleCues = [];
     var subtitleSegments = {};
     var subtitleLastText = null;
+    var subtitleDelay = 0;
+    var subtitleDelayStep = 0.25;
+    var subtitleDelayLimit = 10;
     var subtitleSizes = [
         { key: 'small', label: 'Small', px: 40 },
         { key: 'medium', label: 'Medium', px: 48 },
@@ -219,6 +222,38 @@
         var all = allLastEpisodes();
         all[torrentKey] = Number(index);
         writeJson('rtv.lastEpisode', all);
+    }
+
+    /* Сдвиг субтитров — по торренту и коду дорожки: опаздывает не наш конвейер,
+     * а дорожка в раздаче (у Parks TeamHD «Full (KP)» на ~1 с), и одинаково во всех её сериях. */
+    function allSubtitleDelays() {
+        var data = readJson('rtv.subDelay');
+        return data && typeof data === 'object' ? data : {};
+    }
+
+    function subtitleDelayFor(code) {
+        var forTorrent = allSubtitleDelays()[torrentKey];
+        var v = forTorrent ? Number(forTorrent[code]) : 0;
+        return isFinite(v) ? v : 0;
+    }
+
+    function saveSubtitleDelay(code, seconds) {
+        var all = allSubtitleDelays();
+        var forTorrent = all[torrentKey] || {};
+        if (seconds) forTorrent[code] = seconds;
+        else delete forTorrent[code];
+        all[torrentKey] = forTorrent;
+        writeJson('rtv.subDelay', all);
+    }
+
+    function subtitleDelayText(seconds) {
+        if (!seconds) return 'no shift';
+        return Math.abs(seconds) + ' s ' + (seconds < 0 ? 'earlier' : 'later');
+    }
+
+    function subtitleDelayNote(code) {
+        var seconds = subtitleDelayFor(code);
+        return seconds ? ' · ' + subtitleDelayText(seconds) : '';
     }
 
     function cleanBase(value) {
@@ -362,6 +397,7 @@
         subtitleCues = [];
         subtitleSegments = {};
         subtitleLastText = null;
+        subtitleDelay = 0;
         clearSubtitleCanvas();
     }
 
@@ -416,7 +452,21 @@
         resetSubtitles();
         if (!relativeUrl || selectedSubCode() === 'off') return;
         subtitlePlaylistUrl = /^https?:\/\//i.test(relativeUrl) ? relativeUrl : serverBase + relativeUrl;
+        subtitleDelay = subtitleDelayFor(selectedSubCode());
         pollSubtitlePlaylist();
+    }
+
+    function shiftSubtitles(delta) {
+        var code = selectedSubCode();
+        if (!subtitlePlaylistUrl || code === 'off') {
+            showHud('Subtitles are off');
+            return;
+        }
+        subtitleDelay = Math.round((subtitleDelay + delta) * 100) / 100;
+        subtitleDelay = Math.max(-subtitleDelayLimit, Math.min(subtitleDelayLimit, subtitleDelay));
+        saveSubtitleDelay(code, subtitleDelay);
+        showHud('Subtitles: ' + subtitleDelayText(subtitleDelay));
+        updateSubtitleOverlay();
     }
 
     function ensureSubtitleCanvas() {
@@ -547,7 +597,7 @@
          * Сверка с absoluteTime() давала сдвиг ровно на start — субтитры
          * спешили на столько, с какой минуты продолжили просмотр. На сериях
          * с нуля обе величины совпадают, поэтому баг и не был виден. */
-        var t = lastPlayerTime / 1000;
+        var t = lastPlayerTime / 1000 - subtitleDelay;
         var text = '';
         var i;
         for (i = 0; i < subtitleCues.length; i++) {
@@ -823,7 +873,7 @@
                 el('audioValue').innerHTML = 'No audio track';
             }
             if (subPos === 0) el('subValue').innerHTML = '‹  Off  ›';
-            else el('subValue').innerHTML = '‹  ' + meta.subtitles[subPos - 1].label + '  ›';
+            else el('subValue').innerHTML = '‹  ' + meta.subtitles[subPos - 1].label + subtitleDelayNote(selectedSubCode()) + '  ›';
         } else {
             el('episodeMeta').innerHTML = 'Reading media tracks…';
             el('audioValue').innerHTML = '…';
@@ -1955,6 +2005,8 @@
             showHud();
             if (code === LEFT || code === REW) seekRelative(-30);
             else if (code === RIGHT || code === FF) seekRelative(30);
+            else if (code === UP) shiftSubtitles(-subtitleDelayStep);
+            else if (code === DOWN) shiftSubtitles(subtitleDelayStep);
             else if (code === ENTER || code === PLAY_PAUSE || code === PLAY || code === PAUSE) togglePause();
             else if (code === BACK) stopPlayback(true);
         }
