@@ -1,0 +1,43 @@
+{
+  "log": { "level": "warn", "timestamp": true },
+  "dns": {
+    "servers": [
+      { "type": "tcp", "tag": "remote", "server": "1.1.1.1", "detour": "relay" }
+    ],
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "tun0",
+      "address": ["10.255.255.1/30"],
+      "mtu": 1500,
+      "auto_route": true,
+      "strict_route": true,
+      "route_exclude_address": ["172.17.0.0/16", "192.168.65.254/32"],
+      "stack": "system"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "socks",
+      "tag": "relay",
+      "server": "192.168.65.254",
+      "server_port": 1088,
+      "version": "5",
+      "udp_over_tcp": true
+    }
+  ],
+  "route": {
+    "rules": [
+      { "action": "sniff" },
+      { "protocol": "dns", "action": "hijack-dns" },
+      { "ip_is_private": true, "action": "reject" },
+      { "ip_cidr": ["224.0.0.0/3"], "action": "reject" }
+    ],
+    "final": "relay",
+    "auto_detect_interface": true,
+    "default_domain_resolver": "remote"
+  }
+}

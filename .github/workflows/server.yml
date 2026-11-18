@@ -63,7 +63,7 @@ jobs:
       # tms-deploy лежит без расширения .sh и в client.yml не попадает,
       # а меняется он вместе с deploy/** — то есть вместе с этим workflow.
       - name: shellcheck скрипта деплоя
-        run: shellcheck deploy/tms-deploy
+        run: shellcheck -e SC1091 deploy/tms-deploy deploy/mac/*.sh
 
       # Пока Node-эталон в дереве, проверяем и его синтаксис: golden-файлы
       # тестов сгенерированы из его строк, и сломанный эталон обесценивает их.

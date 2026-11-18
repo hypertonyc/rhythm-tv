@@ -1,0 +1,86 @@
+name: tms
+
+services:
+  egress:
+    image: ghcr.io/sagernet/sing-box:${SINGBOX_TAG:-v1.14.4}
+    container_name: tms-egress
+    command: ["run", "-c", "/etc/sing-box/config.json"]
+    restart: unless-stopped
+    # Сеть bridge, а не сеть проекта: в своей сети Docker подсунул бы встроенный DNS 127.0.0.11,
+    # а тот резолвит через Мак и под VPN — мимо туннеля sing-box.
+    network_mode: bridge
+    dns: ["1.1.1.1"]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "1"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    ports:
+      # Только loopback: Docker.app во входящих закрыт файрволом Мака, в LAN порт отдаёт lanproxy.py.
+      - "127.0.0.1:${HOST_PORT:-8000}:8000"
+    volumes:
+      - ./egress.json:/etc/sing-box/config.json:ro
+    healthcheck:
+      test: ["CMD", "ip", "link", "show", "tun0"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  server:
+    image: ${SERVER_IMAGE:-rhythm-tv/server}:${SERVER_TAG:?SERVER_TAG обязателен}
+    container_name: tms-server
+    command: ["${TORRENT_FILE:-}"]
+    restart: unless-stopped
+    stop_grace_period: 15s
+    # Весь трафик сервера — через tun0 в tms-egress; без него у сервера нет выхода наружу вовсе.
+    network_mode: service:egress
+    depends_on:
+      egress:
+        condition: service_healthy
+        restart: true
+    environment:
+      PORT: "8000"
+      TORRENT_PORT: "${TORRENT_PORT:-42069}"
+      TORRENT_LIB: /data
+      TORRENT_STORE: /var/lib/tms/store
+      TMPDIR: /var/lib/tms/hls
+      HLS_ALLOW_COPY: "${HLS_ALLOW_COPY:-1}"
+      TORRENT_STORE_PERSIST: "1"
+      TORRENT_STORAGE_DEFAULT_FILE_IO: "classic"
+      TORRENT_VERIFY_ON_START: "${TORRENT_VERIFY_ON_START:-0}"
+      PROBE_TIMEOUT_MS: "${PROBE_TIMEOUT_MS:-25000}"
+      STORE_MIN_FREE_GB: "${STORE_MIN_FREE_GB:-20}"
+      STORE_TARGET_FREE_GB: "${STORE_TARGET_FREE_GB:-30}"
+    volumes:
+      - ${TORRENT_DIR:?TORRENT_DIR обязателен}:/data
+      - ${STORE_DIR:?STORE_DIR обязателен}:/var/lib/tms/store
+      - ${HLS_DIR:?HLS_DIR обязателен}:/var/lib/tms/hls
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "${CPU_LIMIT:-6.0}"
+          memory: ${MEM_LIMIT:-2g}
+          pids: 512
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

@@ -1,0 +1,23 @@
+{
+  "log": { "level": "fatal", "timestamp": true },
+  "dns": {
+    "servers": [
+      { "type": "tcp", "tag": "remote", "server": "1.1.1.1", "detour": "en0" }
+    ],
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    { "type": "socks", "tag": "relay-in", "listen": "127.0.0.1", "listen_port": 1088 }
+  ],
+  "outbounds": [
+    { "type": "direct", "tag": "en0", "bind_interface": "en0" }
+  ],
+  "route": {
+    "rules": [
+      { "ip_is_private": true, "action": "reject" },
+      { "ip_cidr": ["224.0.0.0/3"], "action": "reject" }
+    ],
+    "final": "en0",
+    "default_domain_resolver": "remote"
+  }
+}
