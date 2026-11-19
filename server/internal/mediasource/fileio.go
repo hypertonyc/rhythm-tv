@@ -9,7 +9,7 @@ import (
 // Переменная читается в init() пакета storage, поэтому выставить её из своего
 // кода нельзя ВООБЩЕ: инициализация зависимостей идёт раньше main. Она задаётся
 // снаружи — в server/Dockerfile (значит, в любом запуске образа) и явно
-// в deploy/compose.yaml, где описан прод.
+// в deploy/mac/compose.yaml, где описан прод.
 const storageFileIoEnv = "TORRENT_STORAGE_DEFAULT_FILE_IO"
 
 // classicFileIo — единственное годное здесь значение, и вот почему.

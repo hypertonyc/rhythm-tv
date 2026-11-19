@@ -110,7 +110,7 @@ func TestClassicStoreReleasesDeletedFiles(t *testing.T) {
 // стоять в образе — иначе любой запуск, кроме прод-compose, тихо вернётся
 // к mmap, и чистка места перестанет работать.
 func TestImageAsksForClassicFileIo(t *testing.T) {
-	for _, path := range []string{"../../Dockerfile", "../../../deploy/compose.yaml"} {
+	for _, path := range []string{"../../Dockerfile", "../../../deploy/mac/compose.yaml"} {
 		body, err := os.ReadFile(path)
 		if os.IsNotExist(err) {
 			// deploy/ лежит вне модуля: если сервер вынули отдельно,
