@@ -111,7 +111,9 @@ func main() {
 		WarmupBytes: int64(envInt("TORRENT_WARMUP_KB", 256)) << 10,
 		// Дальше готовность не ждёт: у мёртвой раздачи разогрев не кончится,
 		// а уже скачанные серии играть можно.
-		WarmupLimit: time.Duration(envInt("TORRENT_WARMUP_TIMEOUT_MS", 20000)) * time.Millisecond,
+		WarmupLimit:     time.Duration(envInt("TORRENT_WARMUP_TIMEOUT_MS", 20000)) * time.Millisecond,
+		ReannounceAfter: time.Duration(envInt("TORRENT_REANNOUNCE_AFTER_MS", 30000)) * time.Millisecond,
+		ReannounceEvery: time.Duration(envInt("TORRENT_REANNOUNCE_EVERY_MS", 120000)) * time.Millisecond,
 		// Вылеченный файл надо перепрочитать: в кэше ffprobe мог осесть
 		// разбор нулей — с длительностью, но без дорожек субтитров.
 		OnFileHealed: prober.Forget,

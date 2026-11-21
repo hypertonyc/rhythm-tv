@@ -35,6 +35,10 @@ type Client struct {
 	warmupBytes  int64
 	warmupLimit  time.Duration
 	onFileHealed func(storePath string)
+
+	userAgent       string
+	reannounceAfter time.Duration
+	reannounceEvery time.Duration
 }
 
 // Options — настройки клиента.
@@ -79,6 +83,11 @@ type Options struct {
 	// разбор ffprobe: по нулям он возвращает правдоподобный мусор, который
 	// иначе остался бы в кэше навсегда. Может быть nil.
 	OnFileHealed func(storePath string)
+
+	// ReannounceAfter — сколько чтение может ждать данных, прежде чем сервер сам спросит трекеры
+	// о пирах (reannounce.go). Ноль выключает. ReannounceEvery — пауза до повтора, дальше удваивается.
+	ReannounceAfter time.Duration
+	ReannounceEvery time.Duration
 }
 
 const defaultReadahead = 8 << 20
@@ -121,6 +130,10 @@ func NewClient(opts Options) (*Client, error) {
 		warmupBytes:  opts.WarmupBytes,
 		warmupLimit:  opts.WarmupLimit,
 		onFileHealed: opts.OnFileHealed,
+
+		userAgent:       cfg.HTTPUserAgent,
+		reannounceAfter: opts.ReannounceAfter,
+		reannounceEvery: opts.ReannounceEvery,
 	}, nil
 }
 
@@ -210,6 +223,10 @@ func (c *Client) Add(torrentPath string) (*Torrent, error) {
 
 	tr.sampler.Add(1)
 	go tr.sampleRate()
+	if c.reannounceAfter > 0 {
+		tr.sampler.Add(1)
+		go tr.watchStall(c.client, c.userAgent, c.reannounceAfter, max(c.reannounceEvery, c.reannounceAfter))
+	}
 
 	return tr, nil
 }
@@ -247,6 +264,7 @@ type Torrent struct {
 
 	readahead int64
 	meter     *Meter
+	stall     stallClock
 	stopOnce  sync.Once
 	stop      chan struct{}
 	sampler   sync.WaitGroup
@@ -335,7 +353,7 @@ func (t *Torrent) Open(index int) (Reader, error) {
 	}
 	r := all[index].NewReader()
 	r.SetReadahead(t.readahead)
-	return &boundReader{r: r, owner: t.ctx}, nil
+	return &boundReader{r: r, owner: t.ctx, stall: &t.stall}, nil
 }
 
 func (t *Torrent) Stats() Stats {
@@ -383,15 +401,20 @@ func (t *Torrent) Close() error {
 type boundReader struct {
 	r     torrent.Reader
 	owner context.Context
+	stall *stallClock
 }
 
-func (b *boundReader) ReadContext(ctx context.Context, p []byte) (int, error) {
+func (b *boundReader) ReadContext(ctx context.Context, p []byte) (n int, err error) {
 	if b.owner != nil {
 		merged, cancel := context.WithCancel(ctx)
 		defer cancel()
 		stop := context.AfterFunc(b.owner, cancel)
 		defer stop()
 		ctx = merged
+	}
+	if b.stall != nil {
+		b.stall.begin(time.Now())
+		defer func() { b.stall.end(time.Now(), n) }()
 	}
 	return b.r.ReadContext(ctx, p)
 }
