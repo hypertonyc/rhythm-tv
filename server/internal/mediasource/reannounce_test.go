@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -86,6 +88,26 @@ func TestReannounceScheduleBacksOff(t *testing.T) {
 	}
 	if !r.due(30*time.Second, at(7*time.Minute+time.Second)) {
 		t.Error("после восстановления новый простой ждёт старую паузу")
+	}
+}
+
+func TestAnnounceErrorHidesTrackerURL(t *testing.T) {
+	err := &url.Error{
+		Op:  "Get",
+		URL: "http://tracker.example/ann?uk=SECRETPASSKEY&peer_id=-GT0003-abc",
+		Err: errors.New("dial tcp: lookup tracker.example: i/o timeout"),
+	}
+	got := announceError(fmt.Errorf("announce: %w", err))
+	if strings.Contains(got, "SECRETPASSKEY") || strings.Contains(got, "peer_id") {
+		t.Errorf("в лог уходит адрес анонса: %q", got)
+	}
+	if !strings.Contains(got, "i/o timeout") {
+		t.Errorf("потерялась причина: %q", got)
+	}
+
+	long := announceError(errors.New(strings.Repeat("я", 1000)))
+	if n := len([]rune(long)); n > announceErrorMax+1 {
+		t.Errorf("ошибка не обрезана: %d символов", n)
 	}
 }
 

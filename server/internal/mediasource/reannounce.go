@@ -3,6 +3,7 @@ package mediasource
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -121,7 +122,7 @@ func reannounce(ctx context.Context, cl *torrent.Client, tt *torrent.Torrent, us
 		}
 		got, err := announceOnce(ctx, u, req, userAgent)
 		if err != nil {
-			reports = append(reports, fmt.Sprintf("%s: %v", trackerHost(u), err))
+			reports = append(reports, fmt.Sprintf("%s: %s", trackerHost(u), announceError(err)))
 			continue
 		}
 		reports = append(reports, fmt.Sprintf("%s: %d", trackerHost(u), len(got)))
@@ -183,6 +184,21 @@ func announceOnce(ctx context.Context, trackerURL string, req tracker.AnnounceRe
 		peers = append(peers, pi)
 	}
 	return peers, nil
+}
+
+const announceErrorMax = 160
+
+// В адресе анонса на приватных трекерах лежит passkey, а url.Error печатает адрес целиком.
+func announceError(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		err = ue.Err
+	}
+	msg := []rune(err.Error())
+	if len(msg) > announceErrorMax {
+		return string(msg[:announceErrorMax]) + "…"
+	}
+	return string(msg)
 }
 
 func announceable(trackerURL string) bool {
