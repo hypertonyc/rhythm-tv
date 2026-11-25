@@ -27,6 +27,7 @@ func (s *stubSource) Name() string                         { return filepath.Bas
 func (s *stubSource) Files() []mediasource.File            { return make([]mediasource.File, 0) }
 func (s *stubSource) Open(int) (mediasource.Reader, error) { return nil, errors.New("не нужно") }
 func (s *stubSource) Stats() mediasource.Stats             { return mediasource.Stats{} }
+func (s *stubSource) OpenFiles() []int                     { return nil }
 func (s *stubSource) Close() error                         { s.closed = true; return nil }
 
 // opener собирает OpenFunc и запоминает выданные источники.
@@ -508,5 +509,54 @@ func TestStoredFilesCoversWholeLibrary(t *testing.T) {
 	}
 	if got["фильм.mkv"].Active || got["фильм.mkv"].TorrentID != single.ID {
 		t.Error("файл неактивного торрента приписан не тому торренту")
+	}
+}
+
+// TestStoredFilesCarryPieces — по кускам чистка видит соседа защищённой серии:
+// граничный кусок у них общий, и выселение соседа сняло бы с него отметку.
+func TestStoredFilesCarryPieces(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Сериал")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"s01e01.mkv", "s01e02.mkv", "s01e03.mkv"} {
+		if err := os.WriteFile(filepath.Join(root, name), make([]byte, 40000), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info := metainfo.Info{PieceLength: 1 << 14}
+	if err := info.BuildFromFilePath(root); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := bencode.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := (&metainfo.MetaInfo{InfoBytes: raw}).Write(&buf); err != nil {
+		t.Fatal(err)
+	}
+	open, _ := opener(t)
+	lib := New(t.TempDir(), t.TempDir(), open)
+	if _, err := lib.Add(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := lib.StoredFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2]int{
+		"Сериал/s01e01.mkv": {0, 2},
+		"Сериал/s01e02.mkv": {2, 4},
+		"Сериал/s01e03.mkv": {4, 7},
+	}
+	if len(files) != len(want) {
+		t.Fatalf("файлов %d, ожидалось %d", len(files), len(want))
+	}
+	for _, f := range files {
+		if got := [2]int{f.FirstPiece, f.LastPiece}; got != want[f.Rel] {
+			t.Errorf("%q: куски %v, ожидалось %v", f.Rel, got, want[f.Rel])
+		}
 	}
 }

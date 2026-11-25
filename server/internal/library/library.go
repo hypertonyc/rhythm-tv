@@ -239,6 +239,9 @@ type StoredFile struct {
 	// Length — размер по метаинформации. Сколько файл занимает НА ДИСКЕ,
 	// библиотека не знает и знать не должна: скачано может быть сколько угодно.
 	Length int64
+	// FirstPiece и LastPiece — как у mediasource.StoreFile, с граничными: по ним
+	// чистка не трогает файл, делящий кусок с защищённым (internal/reclaim).
+	FirstPiece, LastPiece int
 	// Active — файл принадлежит активному торренту. Сам по себе это не повод
 	// его беречь: выселять старые серии идущего сериала как раз и надо.
 	Active bool
@@ -274,6 +277,8 @@ func (l *Library) StoredFiles() ([]StoredFile, error) {
 				Index:       f.Index,
 				Rel:         f.Rel,
 				Length:      f.Length,
+				FirstPiece:  f.FirstPiece,
+				LastPiece:   f.LastPiece,
 				Active:      e.ID == l.activeID,
 			})
 		}

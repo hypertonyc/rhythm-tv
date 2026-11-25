@@ -74,7 +74,7 @@ func TestFilesAreSortedByPathNotByMetainfoOrder(t *testing.T) {
 // Без сортировки next после первой серии девятого сезона указывал на «The Last
 // One», то есть на финал сериала: в метаинформации она стоит следующей по размеру.
 func TestNeighboursFollowSortedOrder(t *testing.T) {
-	s, src := newFriendsServer(t)
+	_, src := newFriendsServer(t)
 
 	// Индексы в торренте: 2 = s09e06, 5 = s09e13, 0 = s09e23-24,
 	// 4 = s10e01, 1 = s10e17-18.
@@ -91,7 +91,7 @@ func TestNeighboursFollowSortedOrder(t *testing.T) {
 		{3, nil, nil},
 	}
 	for _, c := range cases {
-		next, prev := s.neighbours(src, c.index)
+		next, prev := Neighbours(src, c.index)
 		if !samePtr(next, c.next) {
 			t.Errorf("index %d: next %s, ожидалось %s", c.index, showPtr(next), showPtr(c.next))
 		}

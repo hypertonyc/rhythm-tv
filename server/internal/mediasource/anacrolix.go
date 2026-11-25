@@ -265,6 +265,7 @@ type Torrent struct {
 	readahead int64
 	meter     *Meter
 	stall     stallClock
+	open      openFiles
 	stopOnce  sync.Once
 	stop      chan struct{}
 	sampler   sync.WaitGroup
@@ -353,8 +354,10 @@ func (t *Torrent) Open(index int) (Reader, error) {
 	}
 	r := all[index].NewReader()
 	r.SetReadahead(t.readahead)
-	return &boundReader{r: r, owner: t.ctx, stall: &t.stall}, nil
+	return &boundReader{r: r, owner: t.ctx, stall: &t.stall, release: t.open.acquire(index)}, nil
 }
+
+func (t *Torrent) OpenFiles() []int { return t.open.indices() }
 
 func (t *Torrent) Stats() Stats {
 	tt := t.tor.Load()
@@ -399,9 +402,10 @@ func (t *Torrent) Close() error {
 // ReadContext: у anacrolix Drop не обрывает выданные Reader'ы, и префетч
 // снятого торрента продолжал бы держать окно приоритета.
 type boundReader struct {
-	r     torrent.Reader
-	owner context.Context
-	stall *stallClock
+	r       torrent.Reader
+	owner   context.Context
+	stall   *stallClock
+	release func()
 }
 
 func (b *boundReader) ReadContext(ctx context.Context, p []byte) (n int, err error) {
@@ -421,7 +425,14 @@ func (b *boundReader) ReadContext(ctx context.Context, p []byte) (n int, err err
 
 func (b *boundReader) Seek(off int64, whence int) (int64, error) { return b.r.Seek(off, whence) }
 func (b *boundReader) SetReadahead(n int64)                      { b.r.SetReadahead(n) }
-func (b *boundReader) Close() error                              { return b.r.Close() }
+
+func (b *boundReader) Close() error {
+	err := b.r.Close()
+	if b.release != nil {
+		b.release()
+	}
+	return err
+}
 
 // ctxReader адаптирует Reader к io.Reader, привязывая чтение к контексту.
 // Нужен там, где стандартная библиотека хочет обычный io.Reader (io.CopyN).

@@ -208,7 +208,7 @@ func main() {
 		JournalPath: filepath.Join(libDir, ".tms-watched"),
 		Catalog:     lib,
 		Store:       client,
-		Playing:     func() string { return playingFile(lib, manager) },
+		Protected:   func() []string { return protectedFiles(lib.Current(), manager.ActiveSnapshot()) },
 	})
 	go keeper.Run(ctx)
 
@@ -309,26 +309,29 @@ func shutdown(srv *http.Server, manager *hls.Manager, lib *library.Library, clie
 	})
 }
 
-// playingFile — путь файла, который сейчас перекодируется, относительно
-// хранилища; пустая строка, если сеанса нет.
-//
-// Единственное, что чистка обязана беречь: ffmpeg читает этот файл петлёй
-// через /raw, и вынутые из-под него куски означают паузу посреди серии, пока
-// они не приедут заново. Всё остальное выселять можно — недостающее докачается.
-func playingFile(lib *library.Library, manager *hls.Manager) string {
-	snap := manager.ActiveSnapshot()
-	if snap == nil {
-		return ""
-	}
-	src := lib.Current()
+// Следующая серия — из httpapi.Neighbours, как у автоперехода: 25.11.2026 чистка выселила
+// скачанное для неё префетчем начало, и автопереход упал на пробе.
+func protectedFiles(src mediasource.Source, session *hls.Snapshot) []string {
 	if src == nil {
-		return ""
+		return nil
 	}
 	files := src.Files()
-	if snap.Index < 0 || snap.Index >= len(files) {
-		return ""
+	var out []string
+	add := func(index int) {
+		if index >= 0 && index < len(files) {
+			out = append(out, files[index].StorePath)
+		}
 	}
-	return files[snap.Index].StorePath
+	if session != nil {
+		add(session.Index)
+		if next, _ := httpapi.Neighbours(src, session.Index); next != nil {
+			add(*next)
+		}
+	}
+	for _, index := range src.OpenFiles() {
+		add(index)
+	}
+	return out
 }
 
 // healthcheck возвращает код возврата для docker HEALTHCHECK.

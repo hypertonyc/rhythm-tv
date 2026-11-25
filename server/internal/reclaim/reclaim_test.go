@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,6 +97,8 @@ func newFixture(t *testing.T, minFree, target, free int64) *fixture {
 
 // add кладёт файл в хранилище и заводит на него запись библиотеки.
 // watchedAgo < 0 означает «не смотрели»; тогда порядок решает mtime.
+// Торрент — первый сегмент пути, куски у каждого файла свои, пока их
+// не переставит pieces.
 func (f *fixture) add(rel string, size int, watchedAgo, modifiedAgo time.Duration) {
 	f.t.Helper()
 	full := filepath.Join(f.dir, filepath.FromSlash(rel))
@@ -110,18 +113,57 @@ func (f *fixture) add(rel string, size int, watchedAgo, modifiedAgo time.Duratio
 		f.t.Fatal(err)
 	}
 
-	torrentFile := filepath.Join(f.dir, "..", "библиотека.torrent")
+	torrentID, _, _ := strings.Cut(rel, "/")
+	torrentFile := filepath.Join(f.dir, "..", torrentID+".torrent")
 	index := len(f.cat.files)
 	f.cat.files = append(f.cat.files, library.StoredFile{
-		TorrentID:   "торрент",
+		TorrentID:   torrentID,
 		TorrentFile: torrentFile,
 		Index:       index,
 		Rel:         rel,
 		Length:      int64(size),
+		FirstPiece:  index * 10,
+		LastPiece:   index*10 + 9,
 	})
 	f.store.byKey[torrentFile+"#"+strconv.Itoa(index)] = rel
 	if watchedAgo >= 0 {
 		f.k.journal.Touch(rel, f.now.Add(-watchedAgo))
+	}
+}
+
+func (f *fixture) pieces(rel string, first, last int) {
+	f.t.Helper()
+	for i := range f.cat.files {
+		if f.cat.files[i].Rel == rel {
+			f.cat.files[i].FirstPiece, f.cat.files[i].LastPiece = first, last
+			return
+		}
+	}
+	f.t.Fatalf("файла %q в библиотеке нет", rel)
+}
+
+func (f *fixture) protect(rels ...string) {
+	f.k.opts.Protected = func() []string { return rels }
+}
+
+func (f *fixture) expectDropped(want ...string) {
+	f.t.Helper()
+	if len(f.store.dropped) != len(want) {
+		f.t.Fatalf("выселено %v, ожидалось %v", f.store.dropped, want)
+	}
+	for i := range want {
+		if f.store.dropped[i] != want[i] {
+			f.t.Fatalf("выселено %v, ожидалось %v", f.store.dropped, want)
+		}
+	}
+}
+
+func (f *fixture) expectKept(rels ...string) {
+	f.t.Helper()
+	for _, rel := range rels {
+		if !exists(f.t, filepath.Join(f.dir, filepath.FromSlash(rel))) {
+			f.t.Errorf("выселен %q, а его трогать было нельзя", rel)
+		}
 	}
 }
 
@@ -186,23 +228,114 @@ func TestSweepDoesNothingAboveThreshold(t *testing.T) {
 	}
 }
 
-// TestSweepKeepsPlayingFile — серию, которую сейчас перекодируют, не выселяют,
-// даже если по журналу она самая старая. Иначе ffmpeg остался бы без кусков
-// посреди серии и зритель увидел бы паузу до конца докачки.
-func TestSweepKeepsPlayingFile(t *testing.T) {
+// TestSweepKeepsProtectedFiles — то, что отдал Protected, не выселяется, даже
+// если по журналу оно самое старое: вынутые куски обернулись бы паузой.
+func TestSweepKeepsProtectedFiles(t *testing.T) {
 	f := newFixture(t, 1<<40, 1<<40, 0)
 	f.add("Друзья/s01e01.mkv", 8<<10, 30*24*time.Hour, time.Hour)
-	f.add("Друзья/s01e02.mkv", 8<<10, 20*24*time.Hour, time.Hour)
-	f.k.opts.Playing = func() string { return "Друзья/s01e01.mkv" }
+	f.add("Друзья/s01e02.mkv", 8<<10, 40*24*time.Hour, time.Hour)
+	f.add("Друзья/s01e03.mkv", 8<<10, 20*24*time.Hour, time.Hour)
+	f.protect("Друзья/s01e01.mkv", "Друзья/s01e02.mkv")
 
 	f.k.Sweep()
 
-	if len(f.store.dropped) != 1 || f.store.dropped[0] != "Друзья/s01e02.mkv" {
-		t.Fatalf("выселено %v, ожидалась только вторая серия", f.store.dropped)
+	f.expectDropped("Друзья/s01e03.mkv")
+	f.expectKept("Друзья/s01e01.mkv", "Друзья/s01e02.mkv")
+}
+
+// TestSweepSkipsNeighbourSharingPieceWithProtected — DropFile снял бы отметку
+// и с граничного куска, а с ним пропали бы начало или хвост защищённого соседа.
+func TestSweepSkipsNeighbourSharingPieceWithProtected(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		protected string
+		neighbour string
+		first     int
+		last      int
+		protFirst int
+		protLast  int
+	}{
+		{name: "хвост соседа — начало играющей", protected: "Друзья/s02e03.mkv",
+			neighbour: "Друзья/s03e14.mkv", first: 50, last: 100, protFirst: 100, protLast: 200},
+		{name: "начало соседа — хвост играющей", protected: "Друзья/s02e03.mkv",
+			neighbour: "Друзья/s03e14.mkv", first: 200, last: 260, protFirst: 100, protLast: 200},
+		{name: "сосед целиком внутри куска защищённого", protected: "Друзья/s02e03.mkv",
+			neighbour: "Друзья/s03e14.mkv", first: 150, last: 150, protFirst: 100, protLast: 200},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t, 1<<40, 1<<40, 0)
+			f.add(c.protected, 8<<10, time.Hour, time.Hour)
+			f.add(c.neighbour, 8<<10, 400*24*time.Hour, time.Hour)
+			f.add("Друзья/s01e01.mkv", 8<<10, 30*24*time.Hour, time.Hour)
+			f.pieces(c.protected, c.protFirst, c.protLast)
+			f.pieces(c.neighbour, c.first, c.last)
+			f.pieces("Друзья/s01e01.mkv", 0, 49)
+			f.protect(c.protected)
+
+			f.k.Sweep()
+
+			f.expectDropped("Друзья/s01e01.mkv")
+			f.expectKept(c.protected, c.neighbour)
+		})
 	}
-	if !exists(t, filepath.Join(f.dir, "Друзья", "s01e01.mkv")) {
-		t.Error("выселена серия, которую сейчас смотрят")
+}
+
+// TestSweepReplaysIncident20261125 — доиграла s02e03, начало следующей s02e04 делило кусок
+// 2935 с s03e14, самой старой по журналу; её выселение раз в минуту сорвало автопереход.
+func TestSweepReplaysIncident20261125(t *testing.T) {
+	f := newFixture(t, 1<<40, 1<<40, 0)
+	f.add("Друзья/s02e03.mkv", 8<<10, 0, time.Hour)
+	f.add("Друзья/s02e04.mkv", 8<<10, -1, 2*time.Minute)
+	f.add("Друзья/s03e14.mkv", 8<<10, 60*24*time.Hour, time.Hour)
+	f.add("Друзья/s01e05.mkv", 8<<10, 50*24*time.Hour, time.Hour)
+	f.add("Друзья/s01e06.mkv", 8<<10, 10*24*time.Hour, time.Hour)
+	f.pieces("Друзья/s02e03.mkv", 2700, 2850)
+	f.pieces("Друзья/s02e04.mkv", 2935, 3080)
+	f.pieces("Друзья/s03e14.mkv", 2860, 2935)
+	f.pieces("Друзья/s01e05.mkv", 100, 250)
+	f.pieces("Друзья/s01e06.mkv", 250, 400)
+	f.protect("Друзья/s02e03.mkv", "Друзья/s02e04.mkv")
+
+	f.k.Sweep()
+
+	f.expectDropped("Друзья/s01e05.mkv", "Друзья/s01e06.mkv")
+	f.expectKept("Друзья/s02e03.mkv", "Друзья/s02e04.mkv", "Друзья/s03e14.mkv")
+}
+
+// TestSharedPieceCountsOnlyWithinTorrent — номера кусков у каждого торрента
+// свои, и кусок 2935 другого сериала с защищённой серией ничего не делит.
+func TestSharedPieceCountsOnlyWithinTorrent(t *testing.T) {
+	f := newFixture(t, 1<<40, 1<<40, 0)
+	f.add("Друзья/s02e04.mkv", 8<<10, -1, 2*time.Minute)
+	f.add("tbbt/S05E11.mkv", 8<<10, 60*24*time.Hour, time.Hour)
+	f.pieces("Друзья/s02e04.mkv", 2935, 3080)
+	f.pieces("tbbt/S05E11.mkv", 2860, 2935)
+	f.protect("Друзья/s02e04.mkv")
+
+	f.k.Sweep()
+
+	f.expectDropped("tbbt/S05E11.mkv")
+}
+
+// TestSweepEvictsFileOnceReaderCloses — открытый читатель защищает файл ровно на время
+// чтения: Protected спрашивается на каждом проходе.
+func TestSweepEvictsFileOnceReaderCloses(t *testing.T) {
+	f := newFixture(t, 1<<40, 1<<40, 0)
+	f.add("Друзья/s02e04.mkv", 8<<10, 400*24*time.Hour, time.Hour)
+	reading := true
+	f.k.opts.Protected = func() []string {
+		if reading {
+			return []string{"Друзья/s02e04.mkv"}
+		}
+		return nil
 	}
+
+	f.k.Sweep()
+	f.expectDropped()
+
+	reading = false
+	f.k.Sweep()
+	f.expectDropped("Друзья/s02e04.mkv")
 }
 
 // TestSweepFallsBackToModTime — у файла, который ещё не смотрели, порядок

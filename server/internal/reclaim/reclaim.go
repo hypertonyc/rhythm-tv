@@ -16,7 +16,8 @@
 //
 // Выселение НЕ разрушительно: снятые куски докачаются по требованию, как любые
 // недостающие. Цена ошибки — время закачки, а не потерянный вечер. Из этого
-// растёт и скупость защит: бережётся ровно то, что сейчас перекодируется.
+// растёт и скупость защит: бережётся только нужное сию минуту (Options.Protected)
+// и соседи этих файлов по общему куску.
 package reclaim
 
 import (
@@ -80,11 +81,9 @@ type Options struct {
 	Catalog Catalog
 	Store   Store
 
-	// Playing отдаёт путь файла, который сейчас перекодируется (относительно
-	// хранилища), или пустую строку. Выселять его нельзя: ffmpeg читает его
-	// через /raw, и вынутые из-под него куски — это пауза посреди серии,
-	// пока они не приедут заново.
-	Playing func() string
+	// Protected — пути (относительно хранилища), которые выселять нельзя: играющая
+	// серия, следующая за ней и всё, что сейчас читают. Спрашивается на каждом проходе.
+	Protected func() []string
 
 	// Now и Free подменяются в тестах; иначе time.Now и statfs.
 	Now  func() time.Time
@@ -229,11 +228,11 @@ func (k *Keeper) Sweep() int64 {
 	if err != nil {
 		return 0
 	}
-	playing := ""
-	if k.opts.Playing != nil {
-		playing = k.opts.Playing()
+	var protected []string
+	if k.opts.Protected != nil {
+		protected = k.opts.Protected()
 	}
-	cands := k.candidates(files, playing)
+	cands, guarded := k.candidates(files, protected)
 	need := k.opts.TargetFree - free
 	var holding int64
 	for _, c := range cands {
@@ -242,8 +241,8 @@ func (k *Keeper) Sweep() int64 {
 	// Сколько кандидаты держат В СУММЕ — единственный способ увидеть в логе,
 	// что выселять больше нечего: место кончилось не из-за торрентов,
 	// и следующая строка про «выселено 0» тогда не загадка, а ответ.
-	log.Printf("чистка места: свободно %s (порог %s), надо освободить %s, кандидатов %d на %s",
-		humanBytes(free), humanBytes(k.opts.MinFree), humanBytes(need), len(cands), humanBytes(holding))
+	log.Printf("чистка места: свободно %s (порог %s), надо освободить %s, кандидатов %d на %s, под защитой %d",
+		humanBytes(free), humanBytes(k.opts.MinFree), humanBytes(need), len(cands), humanBytes(holding), guarded)
 
 	var freed int64
 	var evicted int
@@ -313,12 +312,19 @@ type candidate struct {
 }
 
 // candidates отбирает и упорядочивает всё, что можно выселить.
-func (k *Keeper) candidates(files []library.StoredFile, playing string) []candidate {
-	out := make([]candidate, 0, len(files))
+func (k *Keeper) candidates(files []library.StoredFile, protected []string) (out []candidate, guarded int) {
+	keep := make(map[string]bool, len(protected))
+	for _, rel := range protected {
+		keep[rel] = true
+	}
+	held := make(map[string][]library.StoredFile)
 	for _, f := range files {
-		if f.Rel == playing {
-			continue
+		if keep[f.Rel] {
+			held[f.TorrentID] = append(held[f.TorrentID], f)
 		}
+	}
+	out = make([]candidate, 0, len(files))
+	for _, f := range files {
 		full := filepath.Join(k.opts.StoreDir, filepath.FromSlash(f.Rel))
 		allocated, mod, err := fileUsage(full)
 		if err != nil {
@@ -327,6 +333,10 @@ func (k *Keeper) candidates(files []library.StoredFile, playing string) []candid
 			continue
 		}
 		if allocated < k.opts.MinFileBytes {
+			continue
+		}
+		if keep[f.Rel] || sharesPiece(f, held[f.TorrentID]) {
+			guarded++
 			continue
 		}
 		c := candidate{file: f, allocated: allocated, seen: mod.UnixMilli()}
@@ -347,7 +357,18 @@ func (k *Keeper) candidates(files []library.StoredFile, playing string) []candid
 		// mtime сплошь и рядом совпадает до миллисекунды.
 		return out[i].file.Rel < out[j].file.Rel
 	})
-	return out
+	return out, guarded
+}
+
+// DropFile снимает отметки со всех кусков файла, и защищённый сосед потерял бы край;
+// снять все, кроме общего, нельзя: его часть в удалённом файле сделала бы кусок фантомом.
+func sharesPiece(f library.StoredFile, held []library.StoredFile) bool {
+	for _, h := range held {
+		if f.FirstPiece <= h.LastPiece && h.FirstPiece <= f.LastPiece {
+			return true
+		}
+	}
+	return false
 }
 
 // describeSeen печатает, откуда взялся порядок, — по журналу или по mtime.

@@ -25,6 +25,7 @@ type Fake struct {
 	// после ухода клиента. Тест на утечку ловит это здесь.
 	OpenCount   int
 	ReadersOpen int
+	open        openFiles
 
 	// NotReady эмулирует торрент, у которого ещё нет метаданных.
 	NotReady bool
@@ -78,8 +79,10 @@ func (f *Fake) Open(index int) (Reader, error) {
 	f.OpenCount++
 	f.ReadersOpen++
 	f.mu.Unlock()
-	return &fakeReader{f: fh, owner: f}, nil
+	return &fakeReader{f: fh, owner: f, release: f.open.acquire(index)}, nil
 }
+
+func (f *Fake) OpenFiles() []int { return f.open.indices() }
 
 func (f *Fake) Stats() Stats {
 	f.mu.Lock()
@@ -104,9 +107,10 @@ func (f *Fake) Leaked() int {
 func (f *Fake) Close() error { return nil }
 
 type fakeReader struct {
-	f     *os.File
-	owner *Fake
-	once  sync.Once
+	f       *os.File
+	owner   *Fake
+	release func()
+	once    sync.Once
 }
 
 func (r *fakeReader) ReadContext(ctx context.Context, p []byte) (int, error) {
@@ -126,6 +130,7 @@ func (r *fakeReader) Close() error {
 		r.owner.mu.Lock()
 		r.owner.ReadersOpen--
 		r.owner.mu.Unlock()
+		r.release()
 	})
 	return err
 }

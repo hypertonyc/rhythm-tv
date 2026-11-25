@@ -272,7 +272,7 @@ func (s *Server) handleFiles(w http.ResponseWriter) {
 		errorJSON(w, http.StatusServiceUnavailable, "Torrent metadata is loading")
 		return
 	}
-	list := s.videoFiles(src)
+	list := videoFiles(src)
 	files := make([]fileEntry, 0, len(list))
 	for _, f := range list {
 		files = append(files, fileEntry{Index: f.Index, Name: f.Name, Length: f.Length})
@@ -475,7 +475,7 @@ func sourceFiles(src mediasource.Source) []mediasource.File {
 // ИНДЕКС остаётся индексом файла в торренте и от сортировки не зависит:
 // по нему телевизор хранит rtv.positions и rtv.lastEpisode, а сервер ищет файл
 // для /raw, /api/probe и /api/start.
-func (s *Server) videoFiles(src mediasource.Source) []mediasource.File {
+func videoFiles(src mediasource.Source) []mediasource.File {
 	all := sourceFiles(src)
 	out := make([]mediasource.File, 0, len(all))
 	for _, f := range all {
@@ -499,10 +499,11 @@ func episodeSortKey(f mediasource.File) string {
 	return f.Name
 }
 
-// neighbours — nextVideoIndex/prevVideoIndex: позиция в ОТФИЛЬТРОВАННОМ списке
+// Neighbours — nextVideoIndex/prevVideoIndex: позиция в ОТФИЛЬТРОВАННОМ списке
 // видео, а наружу отдаётся абсолютный индекс файла в торренте.
-func (s *Server) neighbours(src mediasource.Source, index int) (next, prev *int) {
-	list := s.videoFiles(src)
+// Этим же next чистка места бережёт следующую серию (protectedFiles в main.go).
+func Neighbours(src mediasource.Source, index int) (next, prev *int) {
+	list := videoFiles(src)
 	pos := -1
 	for i, f := range list {
 		if f.Index == index {
@@ -526,7 +527,7 @@ func (s *Server) probe(ctx context.Context, src mediasource.Source, index int) (
 	if !ok {
 		return nil, errFileNotFound
 	}
-	next, prev := s.neighbours(src, index)
+	next, prev := Neighbours(src, index)
 	return s.deps.Prober.Probe(ctx, media.Request{
 		// Scope — путь файла в хранилище, и он же ключ кэша разбора.
 		// Индексом кэш ключевать нельзя: активный торрент переключают

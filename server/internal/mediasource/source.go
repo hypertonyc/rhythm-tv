@@ -74,6 +74,8 @@ type Source interface {
 	Name() string
 	Files() []File
 	Open(index int) (Reader, error)
+	// OpenFiles — индексы файлов с незакрытым Reader: чистка места их не выселяет (main.go).
+	OpenFiles() []int
 	Stats() Stats
 	Close() error
 }
