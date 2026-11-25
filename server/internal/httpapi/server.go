@@ -205,6 +205,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/pipeline":
 		s.handlePipeline(w, "")
 		return
+	case "/api/client-log":
+		s.handleClientLog(w, r)
+		return
 	}
 
 	if m := reTorrentAction.FindStringSubmatch(path); m != nil {

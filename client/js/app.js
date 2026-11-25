@@ -103,8 +103,12 @@
         { key: 'xlarge', label: 'Extra large', px: 70 }
     ];
     var subtitleSizePos = 2;
+    /* Консоли на ТВ нет: пульс в лог сервера — единственный след, ушло ли приложение в фон или умерло. */
+    var pulseEveryMs = 60000;
+    var bootedAt = 0;
+    var startsThisRun = 0;
 
-    var menuRows = ['torrent', 'season', 'episode', 'audio', 'sub', 'autonext', 'play', 'settings'];
+    var menuRows =['torrent', 'season', 'episode', 'audio', 'sub', 'autonext', 'play', 'settings'];
     var settingsRows = ['subsize', 'server'];
     /* Индекс серии, которую попросили начать с начала; для остальных Play продолжает. */
     var startOverFor = null;
@@ -128,6 +132,7 @@
 
     window.onerror = function (message, source, line) {
         fatal('JS error: ' + message + '\n' + source + ':' + line);
+        sendPulse('js-error', message + ' ' + source + ':' + line);
         return false;
     };
 
@@ -319,6 +324,72 @@
 
     function apiIgnore(path) {
         api(path, function () {}, 5000);
+    }
+
+    function pageHidden() {
+        if (typeof document.hidden === 'boolean') return document.hidden ? '1' : '0';
+        if (typeof document.webkitHidden === 'boolean') return document.webkitHidden ? '1' : '0';
+        return '?';
+    }
+
+    function failureName(e) {
+        return 'na:' + (e && e.name ? e.name : 'error');
+    }
+
+    function memoryText() {
+        try {
+            return Math.round(tizen.systeminfo.getAvailableMemory() / 1048576) + '/' +
+                Math.round(tizen.systeminfo.getTotalMemory() / 1048576);
+        } catch (e) { return failureName(e); }
+    }
+
+    function avplayState() {
+        try { return webapis.avplay.getState(); } catch (e) { return failureName(e); }
+    }
+
+    function sendPulse(event, detail) {
+        try {
+            if (!serverBase) return;
+            var line = 'ev=' + event +
+                ' up=' + Math.round((new Date().getTime() - bootedAt) / 1000) +
+                ' mode=' + mode +
+                ' starts=' + startsThisRun +
+                ' hidden=' + pageHidden() +
+                ' mem=' + memoryText() +
+                ' av=' + avplayState() +
+                ' sess=' + (currentSessionId || '-') +
+                ' t=' + (mode === 'player' ? Math.round(absoluteTime()) : '-');
+            if (detail !== undefined && detail !== null && detail !== '') line += ' detail=' + String(detail).substring(0, 300);
+            var xhr = new XMLHttpRequest();
+            var url = serverBase + '/api/client-log';
+            var settle = guardedRequest(xhr, url, 5000, function () {});
+            xhr.open('POST', url, true);
+            xhr.timeout = 5000;
+            xhr.setRequestHeader('Content-Type', 'text/plain');
+            xhr.onreadystatechange = function () { if (xhr.readyState === 4) settle(null); };
+            xhr.onerror = function () { settle(null); };
+            xhr.ontimeout = function () { settle(null); };
+            xhr.send(line);
+        } catch (e) {}
+    }
+
+    function watchMemoryStatus() {
+        try {
+            tizen.systeminfo.addPropertyValueChangeListener('MEMORY', function (memory) {
+                sendPulse('memory', memory && memory.status);
+            });
+            return 'ok';
+        } catch (e) { return failureName(e); }
+    }
+
+    function startPulse() {
+        var onVisibility = function () { sendPulse('visibility'); };
+        document.addEventListener('visibilitychange', onVisibility, false);
+        document.addEventListener('webkitvisibilitychange', onVisibility, false);
+        window.addEventListener('pagehide', function () { sendPulse('pagehide'); }, false);
+        window.addEventListener('unload', function () { sendPulse('unload'); }, false);
+        sendPulse('boot', 'memwatch=' + watchMemoryStatus());
+        setInterval(function () { sendPulse('beat'); }, pulseEveryMs);
     }
 
     function xhrText(url, callback, timeout) {
@@ -1383,6 +1454,7 @@
             onstreamcompleted: function () { if (ours()) streamCompleted(); },
             onevent: function () {},
             onerror: function (eventType) {
+                sendPulse('avplay-error', eventType + (ours() ? '' : ' stale'));
                 if (ours()) showHud('AVPlay error: ' + eventType);
             },
             onsubtitlechange: function () {}
@@ -1540,6 +1612,7 @@
             return;
         }
         cancelPendingSeek();
+        startsThisRun++;
         var generation = ++startGeneration;
         /* Оставленный открытым застрявший AVPlay продолжал звать oncurrentplaytime:
          * его часы ложились на новый startOffset и снова взводили watchForStall. */
@@ -1935,6 +2008,7 @@
     }
 
     function exitApp() {
+        sendPulse('exit');
         try { stopPlayback(false); } catch (e) {}
         try { tizen.application.getCurrentApplication().exit(); } catch (e2) {}
     }
@@ -2019,6 +2093,7 @@
         autoNext = storeGet('rtv.autonext', '1') !== '0';
         loadSubtitleSize();
         menuRow = menuRows.indexOf('season');
+        startPulse();
 
         /* Put a screen up before touching the network — a slow or refused request
          * must never leave the TV on a black screen. */
@@ -2040,6 +2115,7 @@
     function bootOnce() {
         if (booted) return;
         booted = true;
+        bootedAt = new Date().getTime();
         try { boot(); }
         catch (e) { fatal('Startup failed: ' + (e && e.message ? e.message : String(e))); }
     }
